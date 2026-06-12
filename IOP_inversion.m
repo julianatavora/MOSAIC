@@ -1,0 +1,635 @@
+%call of function
+[results] = IOP_inversion(RW, RW_std, wavelength, conv_criteria, sst);
+
+
+function [results] = IOP_inversion(RW, RW_std, wavelength, conv_criteria, temp)
+%perform the inversion for all possible values of the parameters.
+
+actualDims = ndims(squeeze(RW));
+if actualDims == 2
+    id = (wavelength >= 650 & wavelength <= 850) & ~((wavelength >= 745 & wavelength <= 773)); %best so far
+    wavelength = wavelength(id);  [~,n] = size(wavelength);
+
+    RW         = RW(:,id);
+    RW_std     = RW_std(:,id);
+    if n<size(RW,2); wavelength = wavelength';  end
+
+elseif actualDims == 3
+    id = (wavelength >= 650 & wavelength <= 850); %best so far
+    wavelength = wavelength(id);  [~,n] = size(wavelength);
+
+    RW         = RW(:,:,id);
+    RW_std     = RW_std(:,:,id);
+    if n<size(RW,3); wavelength = wavelength';  end
+end
+
+warning('off')
+
+rrs     = (RW./pi)     ./ (0.52+ (1.7 .* (RW./pi)));      clear RW
+rrs_std = (RW_std./pi) ./ (0.52+ (1.7 .* (RW_std./pi)));  clear RS_std
+
+%generate all possible eigenvectors
+%--------------------------------------------------------------------------%
+%water backscattering
+bb_sea_water=.0037000*(380^4.32)./(wavelength.^4.32);
+
+%-----------------------------------------------------------------%
+%generate vector(s) for absorption by phytoplankton:
+a_phi = phyto_avg_field(wavelength);
+Sf = ones(1,size(a_phi,1));
+
+%-----------------------------------------------------------------%
+%generate vectors for absorption by cdom and nap:
+
+Snap = [0.001:0.002:0.012]; %
+ap_NIRoffset = 0.0072; %offset as in Rottgers et al 2014: https://aslopubs.onlinelibrary.wiley.com/doi/epdf/10.4319/lo.2014.59.5.1449
+offset_band = 850;
+for i = 1:length(Snap)
+    a_nap(i, :) = (exp(-Snap(i)*(wavelength-443)) - exp(-Snap(i)*(offset_band-443))) + ap_NIRoffset;
+end
+
+%generate vectors for absorption by CDOM:
+Scdom = [0.002:0.002:0.016];  %Scdom = [0.007:0.002:0.016]; %
+for i = 1:length(Scdom)
+    a_cdom(i, :) = exp(-Scdom(i)*(wavelength-440));
+end
+
+%-----------------------------------------------------------------%
+%generate vectors for backscattering by particles:
+Y = [0:0.1:1.6];
+for n = 1:length(Y)
+    bb_p(n, :) = (700./wavelength).^Y(n); %.*(V')
+end
+
+dim.Scdom  = Scdom;
+dim.Snap   = Snap;
+dim.Sf     = Sf;
+dim.Y      = Y;
+%-------------------------------------------------------------------------%
+
+if actualDims == 3
+
+    results.anap_model_mean    =NaN(size(rrs,1),size(rrs,2));
+    results.acdom_model_mean   =NaN(size(rrs,1),size(rrs,2));
+    results.bbp_model_mean     =NaN(size(rrs,1),size(rrs,2));
+    results.aphyt_model_mean   =NaN(size(rrs,1),size(rrs,2));
+    results.Sanap_model_mean   =NaN(size(rrs,1),size(rrs,2));
+    results.Sacdom_model_mean  =NaN(size(rrs,1),size(rrs,2));
+    results.Ybbp_model_mean    =NaN(size(rrs,1),size(rrs,2));
+    results.SPM                =NaN(size(rrs,1),size(rrs,2));
+    results.temp               =NaN(size(rrs,1),size(rrs,2));
+
+    results.anap_model_error   =NaN(size(rrs,1),size(rrs,2));
+    results.acdom_model_error  =NaN(size(rrs,1),size(rrs,2));
+    results.bbp_model_error    =NaN(size(rrs,1),size(rrs,2));
+    results.aphyt_model_error  =NaN(size(rrs,1),size(rrs,2));
+    results.Sanap_model_error  =NaN(size(rrs,1),size(rrs,2));
+    results.Sacdom_model_error =NaN(size(rrs,1),size(rrs,2));
+    results.Ybbp_model_error   =NaN(size(rrs,1),size(rrs,2));
+    results.SPM_unc            =NaN(size(rrs,1),size(rrs,2));
+    results.temp_unc           =NaN(size(rrs,1),size(rrs,2));
+
+    nSave    = 50;                       % save cadence
+    chkFile  = 'results_checkpoint.mat'; % rolling file
+    %load('/Users/jtavorab/Documents/MOSAIC_v2/results_checkpoint_smallvenice.mat');
+
+    for jj = size(rrs,2):-1:1
+        for ii = size(rrs,1):-1:1
+
+            id          = ~isnan(squeeze(rrs(ii,jj,:)));
+            rrs_pix     = squeeze(rrs(ii,jj,id));
+            rrs_std_pix = squeeze(rrs_std(ii,jj,id));
+            wv          = wavelength(id);
+            temp_pix    = temp(ii,jj);
+            if isnan(temp_pix)
+                if any(~isnan(temp))
+                    temp_pix = round((mean(temp,'all','omitnan')-std(temp,0,'all','omitnan')),0):1:round((mean(temp,'all','omitnan')+std(temp,0,'all','omitnan')),0); %mean(temp,'all','omitnan');
+                else
+                    temp_pix = 5:1:34;
+                    %temp_pix = 12:1:34;
+                end
+            end
+
+            if ~isempty(rrs_pix)
+
+                [anap_model, S_anap, acdom_model, S_acdom, bbp_model, Y_bbp, aphyt, SPM, SPM_unc, temp_model, N] = insider_inversion...
+                    (rrs_pix, rrs_std_pix, wv, dim, temp_pix, conv_criteria, bb_sea_water(id), a_phi(:,id), a_nap(:,id), a_cdom(:,id), bb_p(:,id),id);
+
+                if N>0
+
+                    [ap_slope, ap443, ap_slope_std, ap443_std]             = get_AP_coeff_slope(wv,mean(anap_model,1,"omitmissing"),    mean(S_anap,"omitmissing"));
+                    [acdom_slope, acdom440, acdom_slope_std, acdom440_std] = get_ACDOM_coeff_slope(wv,mean(acdom_model,1,"omitmissing"),mean(S_acdom,"omitmissing"));
+                    [bbp_slope, bbp700, bbp_slope_std, bbp700_std]         = get_BBP_coeff_slope(wv,mean(bbp_model,1,"omitmissing"),    mean(Y_bbp,"omitmissing"));
+
+                    results.anap_model_mean(ii,jj)     =ap443;
+                    results.acdom_model_mean(ii,jj)    =acdom440;
+                    results.bbp_model_mean(ii,jj)      =bbp700;
+                    results.aphyt_model_mean(ii,jj)    =mean(aphyt,1,"omitmissing");
+                    results.nn(ii,jj)                  =N;
+                    results.Sanap_model_mean(ii,jj)    =ap_slope;
+                    results.Sacdom_model_mean(ii,jj)   =acdom_slope;
+                    results.Ybbp_model_mean(ii,jj)     =bbp_slope;
+                    results.SPM(ii,jj)                 =SPM;
+                    results.temp(ii,jj)                =[mean(temp_model,"omitmissing")];
+
+                    results.anap_model_error(ii,jj)     =ap443_std;
+                    results.acdom_model_error(ii,jj)    =acdom440_std;
+                    results.bbp_model_error(ii,jj)      =bbp700_std;
+                    results.aphyt_model_error(ii,jj)    =std(aphyt,1,1,"omitmissing");
+                    results.Sanap_model_error(ii,jj)    =ap_slope_std;
+                    results.Sacdom_model_error(ii,jj)   =acdom_slope_std;
+                    results.Ybbp_model_error(ii,jj)     =bbp_slope_std;
+                    results.SPM_unc(ii,jj)              =SPM_unc;
+                    results.temp_unc(ii,jj)             =std(temp_model,"omitmissing");
+
+                end
+            end
+        end
+
+        fprintf('%0.0f/%0.0f\n',jj,size(rrs,2));
+
+        % save every nSave columns
+        if mod(size(rrs,2)-jj+1, nSave) == 0
+            save(chkFile,'results','-v7.3');   % overwrites the same file
+            fprintf('⟹ checkpoint saved to %s (up to col %d)\n', ...
+                chkFile, size(rrs,2)-jj+1);
+        end
+
+    end
+
+elseif actualDims == 2
+
+    results.anap_model_mean    =NaN(size(rrs,1),1);
+    results.acdom_model_mean   =NaN(size(rrs,1),1);
+    results.bbp_model_mean     =NaN(size(rrs,1),1);
+    results.aphyt_model_mean   =NaN(size(rrs,1),1);
+    results.Sanap_model_mean   =NaN(size(rrs,1),1);
+    results.Sacdom_model_mean  =NaN(size(rrs,1),1);
+    results.Ybbp_model_mean    =NaN(size(rrs,1),1);
+    results.SPM                =NaN(size(rrs,1),1);
+    results.temp               =NaN(size(rrs,1),1);
+
+    results.anap_model_error   =NaN(size(rrs,1),1);
+    results.acdom_model_error  =NaN(size(rrs,1),1);
+    results.bbp_model_error    =NaN(size(rrs,1),1);
+    results.aphyt_model_error  =NaN(size(rrs,1),1);
+    results.Sanap_model_error  =NaN(size(rrs,1),1);
+    results.Sacdom_model_error =NaN(size(rrs,1),1);
+    results.Ybbp_model_error   =NaN(size(rrs,1),1);
+    results.SPM_unc            =NaN(size(rrs,1),1);
+    results.temp_unc           =NaN(size(rrs,1),1);
+
+    %tic
+    for ii = 1:1:size(rrs,1)
+        id          = ~isnan(squeeze(rrs(ii,:)))';
+        rrs_pix     = squeeze(rrs(ii,id))';
+        rrs_std_pix = squeeze(rrs_std(ii,id))';
+        wv          = wavelength(id);
+        temp_pix    = temp(ii);
+        if isnan(temp_pix)
+            % temp_pix = 12:1:34;
+            temp_pix = 5:1:34;
+        end
+
+        if ~isempty(rrs_pix)
+
+            [anap_model, S_anap, acdom_model, S_acdom, bbp_model, Y_bbp, aphyt, SPM, SPM_unc, temp_model, N] = insider_inversion...
+                (rrs_pix, rrs_std_pix, wv, dim, temp_pix, conv_criteria, bb_sea_water(id), a_phi(:,id), a_nap(:,id), a_cdom(:,id), bb_p(:,id),id);
+
+            if N>0
+
+                [ap_slope, ap443, ap_slope_std, ap443_std]             = get_AP_coeff_slope(wv,anap_model, S_anap);
+                [acdom_slope, acdom440, acdom_slope_std, acdom440_std] = get_ACDOM_coeff_slope(wv,acdom_model, S_acdom);
+                [bbp_slope, bbp700, bbp_slope_std, bbp700_std]         = get_BBP_coeff_slope(wv,bbp_model, Y_bbp);
+
+                results.anap_model_mean(ii)     =ap443;
+                results.acdom_model_mean(ii)    =acdom440;
+                results.bbp_model_mean(ii)      =bbp700;
+                results.aphyt_model_mean(ii)    =mean(aphyt,1,"omitmissing");
+                results.nn(ii)                  =N;
+                results.Sanap_model_mean(ii)    =ap_slope;
+                results.Sacdom_model_mean(ii)   =acdom_slope;
+                results.Ybbp_model_mean(ii)     =bbp_slope;
+                results.SPM(ii)                 =SPM;
+                results.temp(ii)                =[mean(temp_model,"omitmissing")];
+
+                results.anap_model_error(ii)     =ap443_std;
+                results.acdom_model_error(ii)    =acdom440_std;
+                results.bbp_model_error(ii)      =bbp700_std;
+                results.aphyt_model_error(ii)    =std(aphyt,1,1,"omitmissing");
+                results.Sanap_model_error(ii)    =ap_slope_std;
+                results.Sacdom_model_error(ii)   =acdom_slope_std;
+                results.Ybbp_model_error(ii)     =bbp_slope_std;
+                results.SPM_unc(ii)              =SPM_unc;
+                results.temp_unc(ii)             =std(temp_model,"omitmissing");
+
+            end
+        end
+
+        fprintf('%0.0f/%0.0f\n',ii,size(rrs,1));
+
+    end
+end
+
+end
+
+function [ap_slope, ap443, ap_slope_std, ap443_std] = get_AP_coeff_slope(nm,anap_all,Sanap_all)
+
+anap = mean(anap_all,1,"omitmissing");
+Sanap = mean(Sanap_all,"omitmissing");
+
+% --- Fixed constants ---------------------------------------------
+offset_band  = 850;      % nm
+ap_NIRoffset = 0.0072;   % NIR offset
+
+% --- Cost function ------------------------------------------------
+% x = [Snap; ap_ref443]
+model = @(x, nm) x(2) .* ( exp(-x(1)*(nm-443)) ...
+    - exp(-x(1)*(offset_band-443)) ) ...
+    + ap_NIRoffset;
+cost  = @(x) sum( ( model(x, nm) - anap ).^2 );
+
+% --- Initial guess ------------------------------------------------
+x0 = [Sanap; max(anap)];
+
+% --- Run fminsearch -----------------------------------------------
+opts = optimset('TolX',1e-8,'TolFun',1e-8,'Display','off');
+[x_opt, ~, ~] = fminsearch(cost, x0, opts);
+
+% --- Extract results ---------------------------------------------
+ap_slope  = x_opt(1);
+ap443     = x_opt(2);
+
+ap_slope_std = std(Sanap_all,1,"omitmissing");
+if size(anap_all,1) >1 ; ap443_std = interp1(nm,std(anap_all,1,"omitmissing"),443,'linear','extrap');
+else;                    ap443_std = interp1(nm,anap_all,443,'linear','extrap'); end
+
+end
+
+function [acdom_slope, acdom440, acdom_slope_std, acdom440_std] = get_ACDOM_coeff_slope(nm,aCDOM_all,Sacdom_all)
+
+aCDOM = mean(aCDOM_all,1,"omitmissing");
+Sacdom = mean(Sacdom_all,"omitmissing");
+
+% --- Cost function ------------------------------------------------
+% x = [Snap; ap_ref443]
+model = @(x, nm) x(1) .* exp(-x(2)*(nm - 440));
+cost  = @(x) sum( ( model(x, nm) - aCDOM ).^2 );
+
+% --- Initial guess ------------------------------------------------
+% Snap ~ 0.01 nm⁻¹, ap_ref443 ~ (max measured minus offset)
+x0 = [max(aCDOM); Sacdom ];
+
+% --- Run fminsearch -----------------------------------------------
+opts = optimset('TolX',1e-8,'TolFun',1e-8,'Display','off');
+[x_opt, ~, ~] = fminsearch(cost, x0, opts);
+
+% --- Extract results ---------------------------------------------
+acdom_slope  = x_opt(2);
+acdom440     = x_opt(1);
+
+acdom_slope_std = std(Sacdom_all,1,"omitmissing");
+if size(aCDOM_all,1) >1 ; acdom440_std    = interp1(nm,std(aCDOM_all,1,"omitmissing"),440,'linear','extrap');
+else;                     acdom440_std    = interp1(nm,aCDOM_all,440,'linear','extrap');  end
+
+end
+
+function [bbp_slope, bbp700, bbp_slope_std, bbp700_std] = get_BBP_coeff_slope(nm,bbp_all,Ybbp_all)
+
+bbp = mean(bbp_all,1,"omitmissing");
+Ybbp = mean(Ybbp_all,1,"omitmissing");
+
+% --- Cost function ------------------------------------------------
+% x = [Snap; ap_ref443]
+model = @(x, nm) x(1) .* (700 ./ nm) .^ x(2);
+cost  = @(x) sum( ( model(x, nm) - bbp ).^2 );
+
+% --- Initial guess ------------------------------------------------
+% Snap ~ 0.01 nm⁻¹, ap_ref443 ~ (max measured minus offset)
+x0 = [ max(bbp); Ybbp];
+
+% --- Run fminsearch -----------------------------------------------
+opts = optimset('TolX',1e-8,'TolFun',1e-8,'Display','off');
+[x_opt, ~, ~] = fminsearch(cost, x0, opts);
+
+% --- Extract results ---------------------------------------------
+bbp_slope  = x_opt(2);
+bbp700     = x_opt(1);
+
+bbp_slope_std = std(Ybbp_all,1,"omitmissing");
+if size(bbp_all,1) >1 ; bbp700_std    = interp1(nm,std(bbp_all,1,"omitmissing"),700,'linear');
+else;                   bbp700_std    = interp1(nm,bbp_all,700,'linear','extrap');    end
+
+end
+
+
+function [anap_model_cum, eigen_anap_cum, acdom_model_cum,   eigen_acdom_cum, bbp_model_cum, eigen_bbp_cum, ...
+    aphyt_model_cum, SPM_model_cum,  SPM_model_unc_cum, temp_cum, N_cum]=...
+    insider_inversion(rrs_pix, rrs_std_pix, wv, dim, temp_pix, conv_criteria, bb_sea_water, a_phi, a_nap, a_cdom, bb_p_ori, id)
+
+%-------------------------------------------------------------------------%
+bbp_model_cum      = [];
+bbp_exp_model_cum  = [];
+anap_model_cum     = [];
+acdom_model_cum    = [];
+eigen_anap_cum     = [];
+eigen_acdom_cum    = [];
+eigen_bbp_cum      = [];
+temp_cum           = [];
+aphyt_model_cum     = [];
+SPM_model_cum      = [];
+SPM_model_unc_cum  = [];
+N_cum              = [];
+
+%paramters of model relating Rrs to IOP
+L3 = 0.0949; %the one chosen
+L4 = 0.0794;
+
+% L3 = 0.0788; %joshi 2018
+% L4 = 0.2379;
+
+% L3 = 0.084; %lee2002
+% L4 = 0.17;
+
+if any(~isnan(rrs_pix))
+
+    for q = 1:length(temp_pix)
+        %temp_pix(q)
+        %--------------------------------------------------------------------------%
+        %water absorption
+        a_sea_water = asw_corr(temp_pix(q),wv);
+        %--------------------------------------------------------------------------%
+
+        [V,~]   = v(L3, L4, rrs_pix);
+        h       = Array_h(a_sea_water, bb_sea_water, V');
+        bb_p    = bb_p_ori.*V';
+
+        %-----------------------------------------------------------------%
+        %generate all possible combination of eigenvectors
+        k = 0;
+        for i = 1:length(dim.Snap)
+            for m = 1:length(dim.Scdom)
+                for n = 1:length(dim.Y)
+                    for g = 1:length(dim.Sf)
+                        k = k+1;
+                        B_matrix(:, :, :, k) = [dim.Snap(i); dim.Scdom(m); dim.Y(n);   dim.Sf(g) ]; %Sfcoef(g);
+                        D_matrix(:, :, :, k) = [a_nap(i, :); a_cdom(m, :); bb_p(n, :); a_phi(g, :)];
+                    end
+                end
+            end
+        end
+
+        %-----------------------------------------------------------------%
+        % Obtain linear solution by SVD decomposition for every combination of eigenvectors
+        for i = 1:length(dim.Snap)*length(dim.Y)*length(dim.Scdom)*length(dim.Sf)
+            A = D_matrix(:, :, i)';
+            b = h;
+            [U, S, J] = svd(A, 'econ'); % SVD decomposition
+
+            % Invert the diagonal S matrix, with thresholding for stability
+            s = diag(S);
+            tol = max(size(A)) * eps(max(s));  % typical SVD threshold
+            s_inv = zeros(size(s));
+            s_inv(s > tol) = 1 ./ s(s > tol);
+            S_inv = diag(s_inv);
+
+            x = J * S_inv * U' * b; % Compute least-squares solution
+            p_matrix(:, i) = x; % Store result
+        end
+        clear A b s tol S_inv s_inv x J S U
+
+        %----------------------------------------------------------------%
+        %keep only realistic solutions:
+        B = find(p_matrix(1,:)>-0.002 &  p_matrix(2,:)>-0.002 & p_matrix(3,:)>-0.002 & p_matrix(4,:)>-0.002);
+
+        o = 1;
+        if  ~isempty(B)
+            %-----------------------------------------------------------------%
+            %for each solution obtain the IOP associated with that solution:
+            k=1;
+            for i=1:length(dim.Snap)
+                for m=1:length(dim.Scdom)
+                    for n=1:length(dim.Y)
+                        for g=1:length(dim.Sf)
+                            A_nap(k,:)  =  a_nap(i,:)*p_matrix(1, k);
+                            A_cdom(k,:) =  a_cdom(m,:)*p_matrix(2, k);
+                            B_bp(k,:)   =  bb_p(n,:)./V'*p_matrix(3,k);
+                            A_phi(k,:)  =  a_phi(g,:)*p_matrix(4,k);
+                            k=k+1;
+                        end
+                    end
+                end
+            end
+
+            for i=1:length(dim.Snap)*length(dim.Y)*length(dim.Scdom)*length(dim.Sf)
+                a(i,:) = A_nap(i,:) + A_cdom(i,:)  + a_sea_water + A_phi(i,:); %   %compute the total absorption
+                b(i,:) = B_bp(i,:)  + bb_sea_water; %compute total backscattering
+            end
+
+            %----------------------------------------------------------------%
+            %generate the Rrs based on the solutions:
+            for i=1:length(B)
+                rrs_model(i,:) = L3*(b(B(i),:)./(a(B(i),:) + b(B(i),:)))+L4*(b(B(i),:)./(a(B(i),:) + b(B(i),:))).^2;
+            end
+
+            % figure(100);
+            % plot(wv,rrs_model,'b','LineWidth',0.5)
+            % hold on
+            % plot(wv,rrs_pix,'r','LineWidth',2)
+
+            % --- Precompute convergence criteria threshold ---
+            criteria = max(conv_criteria * rrs_pix', 0.001 * (wv >= 700)); %test on folder Emmanuel suggestions 4
+
+            % --- Compute difference matrix and logical match mask ---
+            diff_rrs = abs(rrs_model - rrs_pix');  % [num_models x num_wavelengths]
+            mask = diff_rrs < criteria;            % [num_models x num_wavelengths]
+
+            % --- Find models that match at all wavelengths ---
+            valid_rows = all(mask, 2);            % [num_models x 1]
+            valid_B = B(valid_rows);              % Indices into model parameter arrays
+            num_valid = numel(valid_B);
+
+            % --- Fetch model parameters in batch ---
+            anap_model(o:o+num_valid-1, :)    = A_nap(valid_B, :);
+            acdom_model(o:o+num_valid-1, :)   = A_cdom(valid_B, :);
+            bbp_model(o:o+num_valid-1, :)     = B_bp(valid_B, :);
+
+            % D_matrix slices
+            D2 = squeeze(D_matrix(3, :, valid_B))';   % [num_valid x num_wavelengths]
+            D3 = squeeze(D_matrix(4, :, valid_B))';   % [num_valid x num_wavelengths]
+
+            [~,n] = size(D2); if n<size(wv,2); D2 = D2';  D3 = D3'; end
+
+            bbp_exp_model(o:o+num_valid-1, :) = D2 ./ V';                                    % Compute bbp_exp
+            aphyt_model(o:o+num_valid-1, :)    = mean(A_phi(valid_B, :) ./ D3, 2, 'omitnan');% aphyt_model from A_phi and D3
+            eigen_anap(o:o+num_valid-1)       = squeeze(B_matrix(1,1,valid_B));              % Eigenvalue Scdom extraction
+            eigen_acdom(o:o+num_valid-1)      = squeeze(B_matrix(2,1,valid_B));              % Eigenvalue Scdom extraction
+            eigen_bbp(o:o+num_valid-1)        = squeeze(B_matrix(3,1,valid_B));              % Eigenvalue Ybbp extraction
+            eigen_temp(o:o+num_valid-1)       = temp_pix(q);                                 % Constant temp for these matches
+            N(o)                              = num_valid;                                   % Model index (original i) tracking
+
+            % % Update output index
+            % o = o + num_valid
+        end
+
+        if  ~exist('N', 'var')
+            N=0;
+            anap_model(1, :)    = NaN(1,length(wv));
+            acdom_model(1, :)   = NaN(1,length(wv));
+            bbp_model(1, :)     = NaN(1,length(wv));
+            bbp_exp_model(1, :) = NaN(1,length(wv));
+            aphyt_model(1,:)    = NaN;%(1,length(wv));
+            eigen_anap(1)       = NaN;
+            eigen_acdom(1)      = NaN;
+            eigen_bbp(1)        = NaN;
+            eigen_temp(1)       = NaN;
+        end
+
+        anap_model_cum     = [anap_model_cum;       anap_model];
+        acdom_model_cum    = [acdom_model_cum;      acdom_model];
+        bbp_model_cum      = [bbp_model_cum;        bbp_model];
+        bbp_exp_model_cum  = [bbp_exp_model_cum;    bbp_exp_model];
+        aphyt_model_cum     = [aphyt_model_cum;       aphyt_model];
+        eigen_anap_cum     = [eigen_anap_cum;       eigen_anap'];
+        eigen_acdom_cum    = [eigen_acdom_cum;      eigen_acdom'];
+        eigen_bbp_cum      = [eigen_bbp_cum;        eigen_bbp'];
+        temp_cum           = [temp_cum;             eigen_temp'];
+        N_cum              = [N_cum;                N];
+
+
+        clear anap_model  acdom_model bbp_model  bbp_exp_model ...
+            aphyt_model eigen_bbp asw N criteria B mask n valid_B ...
+            valid_rows diff_rrs rrs_model eigen_anap eigen_acdom mask ...
+            p_matrix eigen_temp D2 D3 D_matrix B_matrix a A_cdom A_nap A_phi b B_bp...
+            g h i k m n N o Rrs_model rrs_model
+
+
+    end
+
+    %% SPM estimates
+    %-------------------------------------------------------------------------%
+    %generate vectors for IOP's -> backscattering:
+    bbp700    = 0.002:0.002:0.026;
+    bb_p_grid = bbp_exp_model_cum .* (reshape(bbp700, [1, 1, size(bbp700,2)]));
+
+    %-------------------------------------------------------------------------%
+
+    if  any(~isnan(bb_p_grid(:)))
+        %-------------------------------------------------------------------------%
+        %generate saturation mask:
+        SPM_model = bbp_model_cum./bb_p_grid;
+
+        %-------------------------------------------------------------------------%
+        %generate vectors for weight :
+        Weight = weight_asses_field(rrs_std_pix,rrs_pix,wv);
+
+        %---------------------------------------------------------------------------------------------------------------------------------------------------------%
+        %SPM:
+        SPM_model_wm  = sum(mean(SPM_model,[1 3],"omitnan")'.*Weight,"omitnan") ./ sum(Weight,"omitnan");
+
+        SPM_max   = sum(prctile(SPM_model,84,[1 3])'.*Weight, "omitnan") ./ sum(Weight,"omitnan");
+        SPM_min   = sum(prctile(SPM_model,16,[1 3])'.*Weight, "omitnan") ./ sum(Weight,"omitnan");
+        SPM_unc   = mean([SPM_max,SPM_min],'all',"omitnan").*(1./sqrt(5));
+
+        SPM_model_cum     = [SPM_model_cum; SPM_model_wm];
+        SPM_model_unc_cum = [SPM_model_unc_cum; SPM_unc];
+
+    end
+
+end
+
+N_cum = sum(N_cum);
+
+end
+
+
+function [absorp_cor] = asw_corr(temp_pix,nm_touse)
+%   Corrects a_water measured at 22C to temperature Rrs was measured
+%   Needs: temperature at which rrs was measured and wavelengths
+%   asw is from Pope and Fry (97) and Lou
+%--------------------------------------------------------------------------
+
+%interping absorption values every 1nm (wavelength)
+asw = [0.0113700000000000	0.0109980000000000	0.0106260000000000	0.0102340000000000	0.00982200000000000	0.00941000000000000	0.00931400000000000	0.00921800000000000	0.00903800000000000	0.00877400000000000	0.00851000000000000	0.00842200000000000	0.00833400000000000	0.00825800000000000	0.00819400000000000	0.00813000000000000	0.00797800000000000	0.00782600000000000	0.00752600000000000	0.00707800000000000	0.00663000000000000	0.00629400000000000	0.00595800000000000	0.00569200000000000	0.00549600000000000	0.00530000000000000	0.00519200000000000	0.00508400000000000	0.00497000000000000	0.00485000000000000	0.00473000000000000	0.00464600000000000	0.00456200000000000	0.00450400000000000	0.00447200000000000	0.00444000000000000	0.00443200000000000	0.00442400000000000	0.00444400000000000	0.00449200000000000	0.00454000000000000	0.00462000000000000	0.00470000000000000	0.00474800000000000	0.00476400000000000	0.00478000000000000	0.00479600000000000	0.00481200000000000	0.00484600000000000	0.00489800000000000	0.00495000000000000	0.00498600000000000	0.00502200000000000	0.00509200000000000	0.00519600000000000	0.00530000000000000	0.00550000000000000	0.00570000000000000	0.00591000000000000	0.00613000000000000	0.00635000000000000	0.00659400000000000	0.00683800000000000	0.00707000000000000	0.00729000000000000	0.00751000000000000	0.00782600000000000	0.00814200000000000	0.00848400000000000	0.00885200000000000	0.00922000000000000	0.00940800000000000	0.00959600000000000	0.00967600000000000	0.00964800000000000	0.00962000000000000	0.00960000000000000	0.00958000000000000	0.00961400000000000	0.00970200000000000	0.00979000000000000	0.00989400000000000	0.00999800000000000	0.0100620000000000	0.0100860000000000	0.0101100000000000	0.0101460000000000	0.0101820000000000	0.0102800000000000	0.0104400000000000	0.0106000000000000	0.0107200000000000	0.0108400000000000	0.0110000000000000	0.0112000000000000	0.0114000000000000	0.0116800000000000	0.0119600000000000	0.0122200000000000	0.0124600000000000	0.0127000000000000	0.0128600000000000	0.0130200000000000	0.0132000000000000	0.0134000000000000	0.0136000000000000	0.0139200000000000	0.0142400000000000	0.0145200000000000	0.0147600000000000	0.0150000000000000	0.0154800000000000	0.0159600000000000	0.0164200000000000	0.0168600000000000	0.0173000000000000	0.0180200000000000	0.0187400000000000	0.0193600000000000	0.0198800000000000	0.0204000000000000	0.0213600000000000	0.0223200000000000	0.0233600000000000	0.0244800000000000	0.0256000000000000	0.0265600000000000	0.0275200000000000	0.0289000000000000	0.0307000000000000	0.0325000000000000	0.0343800000000000	0.0362600000000000	0.0376800000000000	0.0386400000000000	0.0396000000000000	0.0397200000000000	0.0398400000000000	0.0401000000000000	0.0405000000000000	0.0409000000000000	0.0411800000000000	0.0414600000000000	0.0416200000000000	0.0416600000000000	0.0417000000000000	0.0421400000000000	0.0425800000000000	0.0429200000000000	0.0431600000000000	0.0434000000000000	0.0439200000000000	0.0444400000000000	0.0448000000000000	0.0450000000000000	0.0452000000000000	0.0457600000000000	0.0463200000000000	0.0467600000000000	0.0470800000000000	0.0474000000000000	0.0480000000000000	0.0486000000000000	0.0493400000000000	0.0502200000000000	0.0511000000000000	0.0521400000000000	0.0531800000000000	0.0542600000000000	0.0553800000000000	0.0565000000000000	0.0576200000000000	0.0587400000000000	0.0593600000000000	0.0594800000000000	0.0596000000000000	0.0600000000000000	0.0604000000000000	0.0608600000000000	0.0613800000000000	0.0619000000000000	0.0627400000000000	0.0635800000000000	0.0640400000000000	0.0641200000000000	0.0642000000000000	0.0654000000000000	0.0666000000000000	0.0676600000000000	0.0685800000000000	0.0695000000000000	0.0710200000000000	0.0725400000000000	0.0740800000000000	0.0756400000000000	0.0772000000000000	0.0797600000000000	0.0823200000000000	0.0848000000000000	0.0872000000000000	0.0896000000000000	0.0933200000000000	0.0970400000000000	0.101120000000000	0.105560000000000	0.110000000000000	0.114800000000000	0.119600000000000	0.124620000000000	0.129860000000000	0.135100000000000	0.141700000000000	0.148300000000000	0.154720000000000	0.160960000000000	0.167200000000000	0.177320000000000	0.187440000000000	0.198480000000000	0.210440000000000	0.222400000000000	0.232240000000000	0.242080000000000	0.249140000000000	0.253420000000000	0.257700000000000	0.259780000000000	0.261860000000000	0.263200000000000	0.263800000000000	0.264400000000000	0.265240000000000	0.266080000000000	0.266760000000000	0.267280000000000	0.267800000000000	0.268960000000000	0.270120000000000	0.271660000000000	0.273580000000000	0.275500000000000	0.277700000000000	0.279900000000000	0.281480000000000	0.282440000000000	0.283400000000000	0.286200000000000	0.289000000000000	0.290640000000000	0.291120000000000	0.291600000000000	0.294760000000000	0.297920000000000	0.299840000000000	0.300520000000000	0.301200000000000	0.303800000000000	0.306400000000000	0.308320000000000	0.309560000000000	0.310800000000000	0.315280000000000	0.319760000000000	0.322600000000000	0.323800000000000	0.325000000000000	0.329000000000000	0.333000000000000	0.336000000000000	0.338000000000000	0.340000000000000	0.347200000000000	0.354400000000000	0.360600000000000	0.365800000000000	0.371000000000000	0.379800000000000	0.388600000000000	0.396400000000000	0.403200000000000	0.410000000000000	0.415600000000000	0.421200000000000	0.425000000000000	0.427000000000000	0.429000000000000	0.431800000000000	0.434600000000000	0.436600000000000	0.437800000000000	0.439000000000000	0.442600000000000	0.446200000000000	0.448000000000000	0.448000000000000	0.448000000000000	0.453200000000000	0.458400000000000	0.461800000000000	0.463400000000000	0.465000000000000	0.470200000000000	0.475400000000000	0.479600000000000	0.482800000000000	0.486000000000000	0.492400000000000	0.498800000000000	0.504800000000000	0.510400000000000	0.516000000000000	0.524800000000000	0.533600000000000	0.542200000000000	0.550600000000000	0.559000000000000	0.572200000000000	0.585400000000000	0.598400000000000	0.611200000000000	0.624000000000000	0.639600000000000	0.655200000000000	0.671200000000000	0.687600000000000	0.704000000000000	0.724800000000000	0.745600000000000	0.770200000000000	0.798600000000000	0.827000000000000	0.861800000000000	0.896600000000000	0.932600000000000	0.969800000000000	1.00700000000000	1.05180000000000	1.09660000000000	1.14140000000000	1.18620000000000	1.23100000000000	1.28100000000000	1.33100000000000	1.38260000000000	1.43580000000000	1.48900000000000	1.56460000000000	1.66460000000000	1.76070000000000	1.84440000000000	1.96240000000000	2.08010000000000	2.19740000000000	2.31440000000000	2.44820000000000	2.53040000000000	2.61230000000000	2.64280000000000	2.67330000000000	2.73770000000000	2.76800000000000	2.79820000000000	2.81130000000000	2.82450000000000	2.83760000000000	2.83380000000000	2.84680000000000	2.84300000000000	2.85600000000000	2.85220000000000	2.84840000000000	2.86130000000000	2.85750000000000	2.87040000000000	2.86660000000000	2.87940000000000	2.87560000000000	2.87185000000000	2.86810000000000	2.86430000000000	2.86050000000000	2.87330000000000	2.86950000000000	2.86570000000000	2.86195000000000	2.85820000000000	2.85450000000000	2.83440000000000	2.83070000000000	2.82700000000000	2.82340000000000	2.81160000000000	2.79980000000000	2.77990000000000	2.77630000000000	2.75650000000000	2.75290000000000	2.74130000000000	2.72970000000000	2.71010000000000	2.69050000000000	2.65490000000000	2.64345000000000	2.63200000000000	2.61270000000000	2.59330000000000	2.55800000000000	2.52290000000000	2.51170000000000	2.50050000000000	2.46560000000000	2.44650000000000	2.41170000000000	2.39285000000000	2.37400000000000	2.35520000000000	2.33650000000000	2.31780000000000	2.29915000000000	2.28050000000000	2.24620000000000	2.24340000000000	2.23280000000000	2.22220000000000	2.20380000000000	2.20110000000000	2.19835000000000	2.19560000000000	2.17730000000000	2.19020000000000	2.18750000000000	2.19255000000000	2.19760000000000	2.21030000000000	2.22300000000000	2.23570000000000	2.24840000000000	2.27640000000000	2.30430000000000	2.31685000000000	2.32940000000000	2.38780000000000	2.44600000000000	2.48115000000000	2.51630000000000	2.61990000000000	2.76890000000000	2.84140000000000	2.91390000000000	3.10750000000000	3.20205000000000	3.29660000000000	3.45880000000000	3.60550000000000	3.65385000000000	3.70220000000000	3.78790000000000	3.82090000000000	3.85390000000000	3.90920000000000	3.94940000000000	3.97455000000000	3.99970000000000	4.03970000000000	4.05725000000000	4.07480000000000	4.11450000000000	4.13190000000000	4.14930000000000	4.20360000000000	4.19860000000000	4.22320000000000	4.24775000000000	4.27230000000000	4.28935000000000	4.30640000000000	4.36010000000000	4.36965000000000	4.37920000000000	4.43260000000000	4.44935000000000	4.46610000000000	4.50470000000000	4.52855000000000	4.55240000000000	4.60520000000000	4.65800000000000	4.68160000000000	4.70520000000000	4.72865000000000	4.75210000000000	4.83320000000000	4.86365000000000	4.89410000000000	4.96040000000000	5.00495000000000	5.04950000000000	5.11540000000000	5.15960000000000	5.20380000000000	5.29790000000000	5.34175000000000	5.38560000000000	5.46490000000000	5.51550000000000	5.56610000000000	5.60940000000000	5.65270000000000	5.74540000000000	5.78840000000000	5.83140000000000	5.92350000000000	5.96615000000000	6.00880000000000	6.05120000000000	6.09360000000000	6.18500000000000	6.22710000000000	6.26920000000000	6.36010000000000	6.40880000000000	6.45750000000000	6.56180000000000	6.61710000000000	6.67240000000000	6.72050000000000	6.76860000000000	6.89970000000000	6.96815000000000	7.03660000000000	7.11165000000000	7.18670000000000	7.35790000000000	7.45985000000000	7.56180000000000	7.67700000000000	7.79220000000000	8.08520000000000	8.24735000000000	8.40950000000000	8.60505000000000	8.80060000000000	9.26800000000000	9.54360000000000	9.81920000000000	10.1207000000000	10.4222000000000	10.7766000000000	11.1310000000000	11.9441000000000	12.3767000000000	12.8093000000000	13.2737500000000	13.7382000000000	14.1939000000000	14.6496000000000	15.5737000000000	16.2269500000000	16.8802000000000	17.5306500000000	18.1811000000000	19.6308000000000	20.3429000000000	21.0550000000000	21.9635500000000	22.8721000000000	23.7768500000000	24.6816000000000	25.8473500000000	27.0131000000000	29.7625000000000	31.2492000000000	32.7359000000000	34.4798500000000	36.2238000000000	37.7633000000000	39.3028000000000	40.5735000000000	41.8442000000000	42.8478000000000	43.8514000000000	45.3749000000000	45.8497500000000	46.3246000000000	46.6672500000000	47.0099000000000	47.2862000000000	47.5625000000000	47.7079500000000	47.8534000000000	47.9982000000000	48.1430000000000	48.2872500000000	48.4315000000000	48.6399000000000	48.6544000000000	48.6689000000000	48.6191500000000	48.5694000000000	48.3916000000000	48.2138000000000	48.0367500000000	47.8597000000000	47.6195000000000	47.3793000000000	47.0763500000000	46.7734000000000	46.4081000000000	46.0428000000000	45.6789500000000	45.3151000000000	44.8260500000000	44.3370000000000	43.9763500000000	43.6157000000000	43.1303000000000	42.6449000000000	42.1614500000000	41.6780000000000	41.1965000000000	40.7150000000000	40.1727500000000	39.6305000000000	39.1529500000000	38.6754000000000	38.1373000000000	37.5992000000000	37.0009000000000	36.4026000000000	35.8066500000000	35.2107000000000	34.6171500000000	34.0236000000000	33.4943000000000	32.9650000000000	32.4378500000000	31.9107000000000	31.3855500000000	30.8604000000000	30.2141500000000	29.5679000000000	28.9856500000000	28.4034000000000	27.8234500000000	27.2435000000000	26.7270500000000	26.2106000000000	25.6350000000000	25.0594000000000	24.4860500000000	23.9127000000000	23.6057000000000	23.2987000000000	22.9917000000000	22.4838500000000	21.9760000000000	21.5306500000000	21.0853000000000	20.6417000000000	20.1981000000000	19.8165500000000	19.4350000000000	19.0549500000000	18.6749000000000	18.4167666666667	18.1586333333333	17.9005000000000	17.5237000000000	17.1469000000000	16.8912000000000	16.6355000000000	16.3807500000000	16.1260000000000	15.8722500000000	15.6185000000000	15.4848666666667	15.3512333333333	15.2176000000000	15.0845500000000	14.9515000000000	14.7597500000000	14.5680000000000	14.4952000000000	14.4224000000000	14.3695666666667	14.3167333333333	14.2639000000000	14.1917000000000	14.1195000000000	14.1063000000000	14.0931000000000	14.0799666666667	14.0668333333333	14.0537000000000	14.0991000000000	14.1445000000000	14.2480500000000	14.3516000000000	14.3771000000000	14.4026000000000	14.4281000000000	14.5889500000000	14.7498000000000	14.9680500000000	15.1863000000000	15.3264666666667	15.4666333333333	15.6068000000000	15.8232500000000	16.0397000000000	16.3129500000000	16.5862000000000	16.7625000000000	16.9388000000000	17.1151000000000	17.4434500000000	17.7718000000000	18.2134000000000	18.6550000000000	18.8663333333333	19.0776666666667	19.2890000000000	19.6702500000000	20.0515000000000	20.2985000000000	20.5455000000000	20.7925000000000	21.2273500000000	21.6622000000000	21.9443333333333	22.2264666666667	22.5086000000000	22.9400000000000	23.3714000000000	23.4255333333333	23.4796666666667	23.5338000000000	24.0185500000000	24.5033000000000	24.9298333333333	25.3563666666667	25.7829000000000	26.4873000000000	27.1917000000000	27.7627666666667	28.3338333333333	28.9049000000000	30.2718000000000	31.6387000000000	32.8699666666667	34.1012333333333	35.3325000000000	37.8523000000000	40.3721000000000	42.6227000000000	44.8733000000000	47.1239000000000	49.9878333333333	52.8517666666667	55.7157000000000	60.4577000000000	65.1997000000000	68.5845666666667	71.9694333333333	75.3543000000000	80.6616000000000	85.9689000000000	88.9563666666667	91.9438333333333	94.9313000000000	97.9759666666667	101.020633333333	104.065300000000	107.024150000000	109.983000000000	111.336100000000	112.689200000000	114.042300000000	115.027266666667	116.012233333333	116.997200000000	117.978000000000	118.958800000000	119.216233333333	119.473666666667	119.731100000000	119.987200000000	120.243300000000	120.499400000000	120.754233333333	121.009066666667	121.263900000000	122.231800000000	123.199700000000	123.094933333333	122.990166666667	122.885400000000	123.136466666667	123.387533333333	123.638600000000	123.888366666667	124.138133333333	124.387900000000	124.813550000000	125.239200000000	125.486566666667	125.733933333333	125.981300000000	126.227433333333	126.473566666667	126.719700000000	126.964600000000	127.209500000000	127.454400000000	127.698066666667	127.941733333333	128.185400000000	128.078466666667	127.971533333333	127.864600000000	127.235000000000	126.605400000000	126.848133333333	127.090866666667	127.333600000000	126.881066666667	126.428533333333	125.976000000000	125.871900000000	125.767800000000	125.663700000000	125.214766666667	124.765833333333	124.316900000000	124.214666666667	124.112433333333	124.010200000000	123.221233333333	122.432266666667	121.643300000000	121.543766666667	121.444233333333	121.344700000000	120.903700000000	120.462700000000	120.021700000000	119.923933333333	119.826166666667	119.728400000000	119.290866666667	118.853333333333	118.415800000000	117.980400000000	117.545000000000	117.109600000000	116.676300000000	116.243000000000	115.809700000000	115.716300000000	115.622900000000	115.529500000000	115.099566666667	114.669633333333	114.239700000000	113.811833333333	113.383966666667	112.956100000000	112.614425000000	112.272750000000	111.931075000000	111.589400000000	111.166033333333	110.742666666667	110.319300000000	110.231466666667	110.143633333333	110.055800000000	109.968366666667	109.880933333333	109.793500000000	109.374600000000	108.955700000000	108.536800000000	108.451000000000	108.365200000000	108.279400000000	108.194075000000	108.108750000000	108.023425000000	107.938100000000	108.182533333333	108.426966666667	108.671400000000	109.243233333333	109.815066666667	110.386900000000	110.628300000000	110.869700000000	111.111100000000	111.759600000000	112.408100000000	113.056600000000	113.705100000000	114.594533333333	115.483966666667	116.373400000000	116.933466666667	117.493533333333	118.053600000000	118.934875000000	119.816150000000	120.697425000000	121.578700000000	122.778633333333	123.978566666667	125.178500000000	126.695633333333	128.212766666667	129.729900000000	131.078000000000	132.426100000000	133.774200000000	135.122300000000	137.265600000000	139.408900000000	141.552200000000	144.005933333333	146.459666666667	148.913400000000	151.194400000000	153.475400000000	155.756400000000	158.037400000000	161.102633333333	164.167866666667	167.233100000000	170.202650000000	173.172200000000	176.141750000000	179.111300000000	183.094900000000	187.078500000000	191.062100000000	194.471825000000	197.881550000000	201.291275000000	204.701000000000	209.905100000000	215.109200000000	220.313300000000	224.154575000000	227.995850000000	231.837125000000	235.678400000000	241.772633333333	247.866866666667	253.961100000000	257.991625000000	262.022150000000	266.052675000000	270.083200000000	274.790975000000	279.498750000000	284.206525000000	288.914300000000	295.852166666667	302.790033333333	309.727900000000	313.219250000000	316.710600000000	320.201950000000	323.693300000000	327.627750000000	331.562200000000	335.496650000000	339.431100000000	344.733300000000	350.035500000000	355.337700000000	359.690025000000	364.042350000000	368.394675000000	372.747000000000	378.453725000000	384.160450000000	389.867175000000	395.573900000000	404.464166666667	413.354433333333	422.244700000000	432.691350000000	443.138000000000	453.584650000000	464.031300000000	477.611325000000	491.191350000000	504.771375000000	518.351400000000	538.449850000000	558.548300000000	578.646750000000	598.745200000000	629.161750000000	659.578300000000	689.994850000000	720.411400000000	773.006700000000	825.602000000000	878.197300000000	933.988700000000	989.780100000000	1045.57150000000	1101.36290000000	1174.83795000000	1248.31300000000	1321.78805000000	1395.26310000000	1470.56230000000	1545.86150000000	1621.16070000000	1696.45990000000	1764.61725000000	1832.77460000000	1900.93195000000	1969.08930000000	2034.62815000000	2100.16700000000	2165.70585000000	2231.24470000000	2289.73742500000	2348.23015000000	2406.72287500000	2465.21560000000	2507.84742500000	2550.47925000000	2593.11107500000	2635.74290000000	2669.28495000000	2702.82700000000	2736.36905000000	2769.91110000000	2805.47092500000	2841.03075000000	2876.59057500000	2912.15040000000	2940.91100000000	2969.67160000000	2998.43220000000	3027.19280000000	3047.01732500000	3066.84185000000	3086.66637500000	3106.49090000000	3125.31678000000	3144.14266000000	3162.96854000000	3181.79442000000	3200.62030000000	3207.12430000000	3213.62830000000	3220.13230000000	3226.60028000000	3233.06826000000	3239.53624000000	3246.00422000000	3252.47220000000	3256.73190000000	3260.99160000000	3265.25130000000	3269.51100000000	3271.58512500000	3273.65925000000	3275.73337500000	3277.80750000000	3275.55780000000	3273.30810000000	3271.05840000000	3268.80870000000	3263.13472000000	3257.46074000000	3251.78676000000	3246.11278000000	3240.43880000000	3218.94167500000	3197.44455000000	3175.94742500000	3154.45030000000	3130.93305000000	3107.41580000000	3083.89855000000	3060.38130000000	3036.99167500000	3013.60205000000	2990.21242500000	2966.82280000000	2937.62792000000	2908.43304000000	2879.23816000000	2850.04328000000	2820.84840000000	2795.23744000000	2769.62648000000	2744.01552000000	2718.40456000000	2692.79360000000	2663.53720000000	2634.28080000000	2605.02440000000	2575.76800000000	2534.03475000000	2492.30150000000	2450.56825000000	2408.83500000000	2385.40054000000	2361.96608000000	2338.53162000000	2315.09716000000	2291.66270000000	2258.74095000000	2225.81920000000	2192.89745000000];
+psiT = [-2.13000000000000e-05	-2.13500000000000e-05	-2.14000000000000e-05	-1.34150000000000e-05	-5.43000000000000e-06	-2.14650000000000e-05	-3.75000000000000e-05	-3.75000000000000e-05	-3.75000000000000e-05	-2.15300000000000e-05	-5.56000000000000e-06	2.42000000000000e-06	1.04000000000000e-05	2.39500000000000e-06	-5.61000000000000e-06	-2.16050000000000e-05	-3.76000000000000e-05	2.35000000000000e-06	4.23000000000000e-05	2.83500000000000e-05	1.44000000000000e-05	1.71000000000000e-05	1.98000000000000e-05	1.87000000000000e-05	1.76000000000000e-05	1.32900000000000e-05	8.98000000000000e-06	1.62500000000000e-06	-5.73000000000000e-06	-6.27500000000000e-06	-6.82000000000000e-06	-1.25500000000000e-06	4.31000000000000e-06	1.06050000000000e-05	1.69000000000000e-05	1.73000000000000e-05	1.77000000000000e-05	1.24700000000000e-05	7.24000000000000e-06	3.60515000000000e-06	-2.97000000000000e-08	-1.85485000000000e-06	-3.68000000000000e-06	-3.87500000000000e-06	-4.07000000000000e-06	-7.18500000000000e-06	-1.03000000000000e-05	-1.18500000000000e-05	-1.34000000000000e-05	-1.24500000000000e-05	-1.15000000000000e-05	-8.46500000000000e-06	-5.43000000000000e-06	-2.60100000000000e-06	2.28000000000000e-07	1.23400000000000e-06	2.24000000000000e-06	2.92500000000000e-06	3.61000000000000e-06	3.28500000000000e-06	2.96000000000000e-06	4.10500000000000e-06	5.25000000000000e-06	5.34500000000000e-06	5.44000000000000e-06	6.11500000000000e-06	6.79000000000000e-06	8.84500000000000e-06	1.09000000000000e-05	1.43000000000000e-05	1.77000000000000e-05	1.90000000000000e-05	2.03000000000000e-05	1.81500000000000e-05	1.60000000000000e-05	1.26150000000000e-05	9.23000000000000e-06	8.04500000000000e-06	6.86000000000000e-06	6.85000000000000e-06	6.84000000000000e-06	7.08000000000000e-06	7.32000000000000e-06	6.13000000000000e-06	4.94000000000000e-06	2.31600000000000e-06	-3.08000000000000e-07	-2.25900000000000e-06	-4.21000000000000e-06	-5.17000000000000e-06	-6.13000000000000e-06	-6.29500000000000e-06	-6.46000000000000e-06	-6.39000000000000e-06	-6.32000000000000e-06	-5.69500000000000e-06	-5.07000000000000e-06	-3.64000000000000e-06	-2.21000000000000e-06	-2.67500000000000e-06	-3.14000000000000e-06	-4.22500000000000e-06	-5.31000000000000e-06	-6.97000000000000e-06	-8.63000000000000e-06	-9.36500000000000e-06	-1.01000000000000e-05	-1.02500000000000e-05	-1.04000000000000e-05	-9.85500000000000e-06	-9.31000000000000e-06	-8.51500000000000e-06	-7.72000000000000e-06	-6.30000000000000e-06	-4.88000000000000e-06	-1.88500000000000e-06	1.11000000000000e-06	3.98000000000000e-06	6.85000000000000e-06	9.52500000000000e-06	1.22000000000000e-05	1.50500000000000e-05	1.79000000000000e-05	2.18000000000000e-05	2.57000000000000e-05	3.11500000000000e-05	3.66000000000000e-05	4.52500000000000e-05	5.39000000000000e-05	6.55000000000000e-05	7.71000000000000e-05	8.85500000000000e-05	0.000100000000000000	0.000108500000000000	0.000117000000000000	0.000119500000000000	0.000122000000000000	0.000119500000000000	0.000117000000000000	0.000111000000000000	0.000105000000000000	9.85000000000000e-05	9.20000000000000e-05	8.57000000000000e-05	7.94000000000000e-05	7.32500000000000e-05	6.71000000000000e-05	6.04500000000000e-05	5.38000000000000e-05	4.73000000000000e-05	4.08000000000000e-05	3.49000000000000e-05	2.90000000000000e-05	2.38000000000000e-05	1.86000000000000e-05	1.51000000000000e-05	1.16000000000000e-05	9.25500000000000e-06	6.91000000000000e-06	5.45500000000000e-06	4.00000000000000e-06	1.26500000000000e-06	-1.47000000000000e-06	-4.51000000000000e-06	-7.55000000000000e-06	-9.57500000000000e-06	-1.16000000000000e-05	-1.16500000000000e-05	-1.17000000000000e-05	-9.95000000000000e-06	-8.20000000000000e-06	-8.01500000000000e-06	-7.83000000000000e-06	-9.76500000000000e-06	-1.17000000000000e-05	-1.63500000000000e-05	-2.10000000000000e-05	-2.50000000000000e-05	-2.90000000000000e-05	-3.26000000000000e-05	-3.62000000000000e-05	-4.04000000000000e-05	-4.46000000000000e-05	-4.88000000000000e-05	-5.30000000000000e-05	-5.60000000000000e-05	-5.90000000000000e-05	-6.08500000000000e-05	-6.27000000000000e-05	-6.49500000000000e-05	-6.72000000000000e-05	-6.79000000000000e-05	-6.86000000000000e-05	-6.59000000000000e-05	-6.32000000000000e-05	-5.69500000000000e-05	-5.07000000000000e-05	-4.10500000000000e-05	-3.14000000000000e-05	-1.63950000000000e-05	-1.39000000000000e-06	2.09550000000000e-05	4.33000000000000e-05	6.96500000000000e-05	9.60000000000000e-05	0.000122500000000000	0.000149000000000000	0.000174000000000000	0.000199000000000000	0.000226000000000000	0.000253000000000000	0.000286500000000000	0.000320000000000000	0.000362000000000000	0.000404000000000000	0.000456500000000000	0.000509000000000000	0.000574000000000000	0.000639000000000000	0.000710500000000000	0.000782000000000000	0.000846000000000000	0.000910000000000000	0.000954500000000000	0.000999000000000000	0.00101950000000000	0.00104000000000000	0.00103000000000000	0.00102000000000000	0.000983500000000000	0.000947000000000000	0.000897500000000000	0.000848000000000000	0.000801500000000000	0.000755000000000000	0.000719000000000000	0.000683000000000000	0.000649500000000000	0.000616000000000000	0.000577500000000000	0.000539000000000000	0.000495000000000000	0.000451000000000000	0.000406000000000000	0.000361000000000000	0.000311000000000000	0.000261000000000000	0.000213000000000000	0.000165000000000000	0.000128150000000000	9.13000000000000e-05	6.20000000000000e-05	3.27000000000000e-05	3.55000000000000e-06	-2.56000000000000e-05	-5.42500000000000e-05	-8.29000000000000e-05	-0.000112950000000000	-0.000143000000000000	-0.000169500000000000	-0.000196000000000000	-0.000213500000000000	-0.000231000000000000	-0.000240000000000000	-0.000249000000000000	-0.000267500000000000	-0.000286000000000000	-0.000309000000000000	-0.000332000000000000	-0.000335500000000000	-0.000339000000000000	-0.000328500000000000	-0.000318000000000000	-0.000293000000000000	-0.000268000000000000	-0.000218000000000000	-0.000168000000000000	-0.000101900000000000	-3.58000000000000e-05	2.02500000000000e-05	7.63000000000000e-05	9.56500000000000e-05	0.000115000000000000	0.000112000000000000	0.000109000000000000	8.56500000000000e-05	6.23000000000000e-05	3.69500000000000e-05	1.16000000000000e-05	-1.26000000000000e-05	-3.68000000000000e-05	-6.25000000000000e-05	-8.82000000000000e-05	-0.000128600000000000	-0.000169000000000000	-0.000211500000000000	-0.000254000000000000	-0.000288500000000000	-0.000323000000000000	-0.000342000000000000	-0.000361000000000000	-0.000372000000000000	-0.000383000000000000	-0.000396000000000000	-0.000409000000000000	-0.000426000000000000	-0.000443000000000000	-0.000447000000000000	-0.000451000000000000	-0.000442500000000000	-0.000434000000000000	-0.000427000000000000	-0.000420000000000000	-0.000419000000000000	-0.000418000000000000	-0.000408000000000000	-0.000398000000000000	-0.000352500000000000	-0.000307000000000000	-0.000236500000000000	-0.000166000000000000	-0.000141500000000000	-0.000117000000000000	-2.89500000000000e-05	5.91000000000000e-05	0.000179050000000000	0.000299000000000000	0.000515000000000000	0.000731000000000000	0.000920500000000000	0.00111000000000000	0.00138500000000000	0.00166000000000000	0.00202500000000000	0.00239000000000000	0.00273500000000000	0.00308000000000000	0.00347500000000000	0.00387000000000000	0.00425000000000000	0.00463000000000000	0.00499000000000000	0.00535000000000000	0.00576000000000000	0.00617000000000000	0.00659500000000000	0.00702000000000000	0.00758000000000000	0.00814000000000000	0.00898500000000000	0.00983000000000000	0.0108650000000000	0.0119000000000000	0.0129500000000000	0.0140000000000000	0.0147500000000000	0.0155000000000000	0.0158500000000000	0.0162000000000000	0.0161500000000000	0.0161000000000000	0.0157000000000000	0.0153000000000000	0.0148000000000000	0.0143000000000000	0.0137000000000000	0.0131000000000000	0.0124500000000000	0.0118000000000000	0.0111500000000000	0.0105000000000000	0.00987000000000000	0.00924000000000000	0.00861500000000000	0.00799000000000000	0.00744000000000000	0.00689000000000000	0.00624000000000000	0.00559000000000000	0.00503000000000000	0.00447000000000000	0.00397500000000000	0.00348000000000000	0.00293500000000000	0.00239000000000000	0.00187000000000000	0.00135000000000000	0.000896500000000000	0.000443000000000000	2.99999999999999e-06	-0.000437000000000000	-0.000878500000000000	-0.00132000000000000	-0.00168000000000000	-0.00204000000000000	-0.00244500000000000	-0.00285000000000000	-0.00317000000000000	-0.00349000000000000	-0.00376500000000000	-0.00404000000000000	-0.00429500000000000	-0.00455000000000000	-0.00479500000000000	-0.00504000000000000	-0.00520000000000000	-0.00536000000000000	-0.00551500000000000	-0.00567000000000000	-0.00580500000000000	-0.00594000000000000	-0.00600500000000000	-0.00607000000000000	-0.00611500000000000	-0.00616000000000000	-0.00616000000000000	-0.00616000000000000	-0.00615500000000000	-0.00615000000000000	-0.00608500000000000	-0.00602000000000000	-0.00586500000000000	-0.00571000000000000	-0.00555000000000000	-0.00539000000000000	-0.00517500000000000	-0.00496000000000000	-0.00469000000000000	-0.00442000000000000	-0.00413000000000000	-0.00384000000000000	-0.00350500000000000	-0.00317000000000000	-0.00277000000000000	-0.00237000000000000	-0.00200500000000000	-0.00164000000000000	-0.00122250000000000	-0.000805000000000000	-0.000404995000000000	-4.99000000000000e-06	0.000537505000000000	0.00108000000000000	0.00173500000000000	0.00239000000000000	0.00335000000000000	0.00431000000000000	0.00564000000000000	0.00697000000000000	0.00853500000000000	0.0101000000000000	0.0115500000000000	0.0130000000000000	0.0139000000000000	0.0148000000000000	0.0151500000000000	0.0155000000000000	0.0154500000000000	0.0154000000000000	0.0149500000000000	0.0145000000000000	0.0139000000000000	0.0133000000000000	0.0127000000000000	0.0121000000000000	0.0115000000000000	0.0109000000000000	0.0102450000000000	0.00959000000000000	0.00894500000000000	0.00830000000000000	0.00752000000000000	0.00674000000000000	0.00616000000000000	0.00558000000000000	0.00488500000000000	0.00419000000000000	0.00375000000000000	0.00331000000000000	0.00299500000000000	0.00268000000000000	0.00212000000000000	0.00156000000000000	0.00100950000000000	0.000459000000000000	-6.90000000000000e-05	-0.000597000000000000	-0.00107850000000000	-0.00156000000000000	-0.00309000000000000	-0.00462000000000000	-0.00492000000000000	-0.00522000000000000	-0.00560000000000000	-0.00598000000000000	-0.00631000000000000	-0.00664000000000000	-0.00707000000000000	-0.00750000000000000	-0.00765500000000000	-0.00781000000000000	-0.00798000000000000	-0.00815000000000000	-0.00836500000000000	-0.00858000000000000	-0.00867500000000000	-0.00877000000000000	-0.00883500000000000	-0.00890000000000000	-0.00897000000000000	-0.00904000000000000	-0.00885000000000000	-0.00866000000000000	-0.00866500000000000	-0.00867000000000000	-0.00849500000000000	-0.00832000000000000	-0.00809000000000000	-0.00786000000000000	-0.00750000000000000	-0.00714000000000000	-0.00666000000000000	-0.00618000000000000	-0.00579500000000000	-0.00541000000000000	-0.00459500000000000	-0.00378000000000000	-0.00304500000000000	-0.00231000000000000	-0.00147550000000000	-0.000641000000000000	0.000539500000000000	0.00172000000000000	0.00299500000000000	0.00427000000000000	0.00571500000000000	0.00716000000000000	0.00898000000000000	0.0108000000000000	0.0128500000000000	0.0149000000000000	0.0173500000000000	0.0198000000000000	0.0225000000000000	0.0252000000000000	0.0285000000000000	0.0318000000000000	0.0352000000000000	0.0386000000000000	0.0424500000000000	0.0463000000000000	0.0503500000000000	0.0544000000000000	0.0589500000000000	0.0635000000000000	0.0678500000000000	0.0722000000000000	0.0769000000000000	0.0816000000000000	0.0866500000000000	0.0917000000000000	0.0968500000000000	0.102000000000000	0.107500000000000	0.113000000000000	0.118500000000000	0.124000000000000	0.130500000000000	0.137000000000000	0.144500000000000	0.152000000000000	0.160000000000000	0.168000000000000	0.177000000000000	0.186000000000000	0.195000000000000	0.204000000000000	0.212500000000000	0.221000000000000	0.228000000000000	0.235000000000000	0.240500000000000	0.246000000000000	0.250000000000000	0.254000000000000	0.255000000000000	0.256000000000000	0.254500000000000	0.253000000000000	0.248500000000000	0.244000000000000	0.238000000000000	0.232000000000000	0.223500000000000	0.215000000000000	0.206000000000000	0.197000000000000	0.187500000000000	0.178000000000000	0.167500000000000	0.157000000000000	0.146500000000000	0.136000000000000	0.125500000000000	0.115000000000000	0.104950000000000	0.0949000000000000	0.0848500000000000	0.0748000000000000	0.0654500000000000	0.0561000000000000	0.0468500000000000	0.0376000000000000	0.0293500000000000	0.0211000000000000	0.0130700000000000	0.00504000000000000	-0.00205000000000000	-0.00914000000000000	-0.0153700000000000	-0.0216000000000000	-0.0276000000000000	-0.0336000000000000	-0.0387000000000000	-0.0438000000000000	-0.0483500000000000	-0.0529000000000000	-0.0570500000000000	-0.0612000000000000	-0.0644000000000000	-0.0676000000000000	-0.0705500000000000	-0.0735000000000000	-0.0758500000000000	-0.0782000000000000	-0.0801500000000000	-0.0821000000000000	-0.0836000000000000	-0.0851000000000000	-0.0861500000000000	-0.0872000000000000	-0.0879500000000000	-0.0887000000000000	-0.0889000000000000	-0.0891000000000000	-0.0892000000000000	-0.0893000000000000	-0.0892500000000000	-0.0892000000000000	-0.0887000000000000	-0.0882000000000000	-0.0876500000000000	-0.0871000000000000	-0.0862000000000000	-0.0853000000000000	-0.0843500000000000	-0.0834000000000000	-0.0823000000000000	-0.0812000000000000	-0.0800500000000000	-0.0789000000000000	-0.0777500000000000	-0.0766000000000000	-0.0752000000000000	-0.0738000000000000	-0.0725500000000000	-0.0713000000000000	-0.0699000000000000	-0.0685000000000000	-0.0672500000000000	-0.0660000000000000	-0.0647500000000000	-0.0635000000000000	-0.0620500000000000	-0.0606000000000000	-0.0592500000000000	-0.0579000000000000	-0.0568500000000000	-0.0558000000000000	-0.0546000000000000	-0.0534000000000000	-0.0523000000000000	-0.0512000000000000	-0.0500000000000000	-0.0488000000000000	-0.0478500000000000	-0.0469000000000000	-0.0459000000000000	-0.0449000000000000	-0.0438500000000000	-0.0428000000000000	-0.0419000000000000	-0.0410000000000000	-0.0401500000000000	-0.0393000000000000	-0.0382000000000000	-0.0371000000000000	-0.0364500000000000	-0.0358000000000000	-0.0347500000000000	-0.0337000000000000	-0.0326000000000000	-0.0315000000000000	-0.0305500000000000	-0.0296000000000000	-0.0286500000000000	-0.0277000000000000	-0.0265500000000000	-0.0254000000000000	-0.0241500000000000	-0.0229000000000000	-0.0218500000000000	-0.0208000000000000	-0.0193500000000000	-0.0179000000000000	-0.0164500000000000	-0.0150000000000000	-0.0135500000000000	-0.0121000000000000	-0.0101650000000000	-0.00823000000000000	-0.00664500000000000	-0.00506000000000000	-0.00269500000000000	-0.000330000000000000	0.00136000000000000	0.00305000000000000	0.00555500000000000	0.00806000000000000	0.0108800000000000	0.0137000000000000	0.0164500000000000	0.0192000000000000	0.0224500000000000	0.0257000000000000	0.0293500000000000	0.0330000000000000	0.0369500000000000	0.0409000000000000	0.0454500000000000	0.0500000000000000	0.0554500000000000	0.0609000000000000	0.0671500000000000	0.0734000000000000	0.0813000000000000	0.0892000000000000	0.0986000000000000	0.108000000000000	0.119500000000000	0.131000000000000	0.145000000000000	0.159000000000000	0.175500000000000	0.192000000000000	0.212000000000000	0.232000000000000	0.254000000000000	0.276000000000000	0.302000000000000	0.328000000000000	0.356500000000000	0.385000000000000	0.414500000000000	0.444000000000000	0.472500000000000	0.501000000000000	0.527000000000000	0.553000000000000	0.573500000000000	0.594000000000000	0.606500000000000	0.619000000000000	0.624500000000000	0.630000000000000	0.626000000000000	0.622000000000000	0.612500000000000	0.603000000000000	0.587500000000000	0.572000000000000	0.553500000000000	0.535000000000000	0.513500000000000	0.492000000000000	0.469000000000000	0.446000000000000	0.424000000000000	0.402000000000000	0.378500000000000	0.355000000000000	0.333500000000000	0.312000000000000	0.290500000000000	0.269000000000000	0.250000000000000	0.231000000000000	0.212000000000000	0.193000000000000	0.175500000000000	0.158000000000000	0.142000000000000	0.126000000000000	0.110300000000000	0.0946000000000000	0.0800000000000000	0.0654000000000000	0.0515500000000000	0.0377000000000000	0.0230700000000000	0.00844000000000000	-0.00503000000000000	-0.0185000000000000	-0.0313500000000000	-0.0442000000000000	-0.0567500000000000	-0.0693000000000000	-0.0814500000000000	-0.0936000000000000	-0.105300000000000	-0.117000000000000	-0.128500000000000	-0.140000000000000	-0.150500000000000	-0.161000000000000	-0.171500000000000	-0.182000000000000	-0.191000000000000	-0.200000000000000	-0.208500000000000	-0.217000000000000	-0.225500000000000	-0.234000000000000	-0.241000000000000	-0.248000000000000	-0.254500000000000	-0.261000000000000	-0.267000000000000	-0.273000000000000	-0.278500000000000	-0.284000000000000	-0.288500000000000	-0.293000000000000	-0.297500000000000	-0.302000000000000	-0.305500000000000	-0.309000000000000	-0.312000000000000	-0.315000000000000	-0.318000000000000	-0.321000000000000	-0.323000000000000	-0.325000000000000	-0.326500000000000	-0.328000000000000	-0.329000000000000	-0.330000000000000	-0.330500000000000	-0.331000000000000	-0.331000000000000	-0.331000000000000	-0.330500000000000	-0.330000000000000	-0.329000000000000	-0.328000000000000	-0.327000000000000	-0.326000000000000	-0.323500000000000	-0.321000000000000	-0.319000000000000	-0.317000000000000	-0.314500000000000	-0.312000000000000	-0.308500000000000	-0.305000000000000	-0.301500000000000	-0.298000000000000	-0.294000000000000	-0.290000000000000	-0.285500000000000	-0.281000000000000	-0.276500000000000	-0.272000000000000	-0.267000000000000	-0.262000000000000	-0.256500000000000	-0.251000000000000	-0.246000000000000	-0.241000000000000	-0.235500000000000	-0.230000000000000	-0.223500000000000	-0.217000000000000	-0.211500000000000	-0.206000000000000	-0.200000000000000	-0.194000000000000	-0.187500000000000	-0.181000000000000	-0.175000000000000	-0.169000000000000	-0.162500000000000	-0.156000000000000	-0.150000000000000	-0.144000000000000	-0.138000000000000	-0.132000000000000	-0.126000000000000	-0.120000000000000	-0.114000000000000	-0.108000000000000	-0.101050000000000	-0.0941000000000000	-0.0875000000000000	-0.0809000000000000	-0.0743500000000000	-0.0678000000000000	-0.0603000000000000	-0.0528000000000000	-0.0554500000000000	-0.0581000000000000	-0.0513000000000000	-0.0445000000000000	-0.0357500000000000	-0.0270000000000000	-0.0177350000000000	-0.00847000000000000	0.00111500000000000	0.0107000000000000	0.0229500000000000	0.0352000000000000	0.0452500000000000	0.0553000000000000	0.0693500000000000	0.0834000000000000	0.0967000000000000	0.110000000000000	0.125000000000000	0.140000000000000	0.157000000000000	0.174000000000000	0.190500000000000	0.207000000000000	0.226000000000000	0.245000000000000	0.264000000000000	0.283000000000000	0.305000000000000	0.327000000000000	0.350500000000000	0.374000000000000	0.396500000000000	0.419000000000000	0.449000000000000	0.479000000000000	0.508500000000000	0.538000000000000	0.564000000000000	0.590000000000000	0.621000000000000	0.652000000000000	0.685000000000000	0.718000000000000	0.752000000000000	0.786000000000000	0.822500000000000	0.859000000000000	0.896500000000000	0.934000000000000	0.972000000000000	1.01000000000000	1.05500000000000	1.10000000000000	1.14500000000000	1.19000000000000	1.24000000000000	1.29000000000000	1.34000000000000	1.39000000000000	1.44000000000000	1.49000000000000	1.54500000000000	1.60000000000000	1.66500000000000	1.73000000000000	1.81000000000000	1.89000000000000	1.97000000000000	2.05000000000000	2.14500000000000	2.24000000000000	2.34500000000000	2.45000000000000	2.56500000000000	2.68000000000000	2.81500000000000	2.95000000000000	3.10500000000000	3.26000000000000	3.45500000000000	3.65000000000000	3.86500000000000	4.08000000000000	4.33000000000000	4.58000000000000	4.85000000000000	5.12000000000000	5.38500000000000	5.65000000000000	5.96500000000000	6.28000000000000	6.63000000000000	6.98000000000000	7.31500000000000	7.65000000000000	8.01500000000000	8.38000000000000	8.76500000000000	9.15000000000000	9.87500000000000	10.6000000000000	11.0500000000000	11.5000000000000	11.9000000000000	12.3000000000000	12.6500000000000	13	13.3000000000000	13.6000000000000	13.7500000000000	13.9000000000000	13.9500000000000	14	13.9500000000000	13.9000000000000	13.6000000000000	13.3000000000000	13.1000000000000	12.9000000000000	12.6500000000000	12.4000000000000	12	11.6000000000000	11.1500000000000	10.7000000000000	10.1800000000000	9.66000000000000	9.09000000000000	8.52000000000000	7.92000000000000	7.32000000000000	6.69000000000000	6.06000000000000	5.43000000000000	4.80000000000000	4.17000000000000	3.54000000000000	2.93500000000000	2.33000000000000	1.73500000000000	1.14000000000000	0.574410000000000	0.00882000000000000	-0.520590000000000	-1.05000000000000	-1.54500000000000	-2.04000000000000	-2.50000000000000	-2.96000000000000	-3.37500000000000	-3.79000000000000	-4.18000000000000	-4.57000000000000	-4.92500000000000	-5.28000000000000	-5.60000000000000	-5.92000000000000	-6.22000000000000	-6.52000000000000	-6.79500000000000	-7.07000000000000	-7.33500000000000	-7.60000000000000	-7.85500000000000	-8.11000000000000	-8.35000000000000	-8.59000000000000	-8.80500000000000	-9.02000000000000	-9.22000000000000	-9.42000000000000	-9.60000000000000	-9.78000000000000	-9.94000000000000	-10.1000000000000	-10.2500000000000	-10.4000000000000	-10.5000000000000	-10.6000000000000	-10.6500000000000	-10.7000000000000	-10.8000000000000	-10.9000000000000	-10.9500000000000	-11	-11	-11	-11	-11	-11	-11	-11	-11	-11	-11	-10.9500000000000	-10.9000000000000	-10.8500000000000	-10.8000000000000	-10.7500000000000	-10.7000000000000];
+nm_sample = [380:1:1500];
+
+% Interpolate asw and psiT to match the requested wavelengths (nm_touse)
+interpolated_asw  = interp1(nm_sample, asw,  nm_touse, 'linear', 'extrap');
+interpolated_psiT = interp1(nm_sample, psiT, nm_touse, 'linear', 'extrap');
+
+% Compute corrected absorption coefficients
+absorp_cor = interpolated_asw + (interpolated_psiT .* (temp_pix - 22));
+
+end
+
+function [Weight] = weight_asses_field(error,rrs,nm)
+% Weight assessment function for SPM and associated uncertainty estimates
+%
+% INPUTS:
+% nm         -  wavelengths associated with measured Remote sensing reflectance
+% std        -  standard deviation of measured below water rrs(nm)
+% rrs        -  measured below water rrs(nm)
+%
+% OUTPUTS:
+% Weight     - Maximum uncertainty taking into account absolute and relative uncertainties propagated to SPM
+%----------------------------------------------------------------------------------------------------------------------------------------------------%
+
+relative = (sqrt(2).* 0.05 .* rrs);
+
+%----------------------------------------------------------------------------------------------------------------------------------------------------%
+% uncertainty
+if isnan(error)
+    absolute = repmat(std(abs((smoothdata(rrs,"movmean",10))' - rrs'),"omitnan"),1,length(nm))';
+else
+    absolute = error;
+end
+[m,n] = size(absolute); if m<n; absolute = absolute'; end
+[m,n] = size(relative); if m<n; relative = relative'; end
+
+
+% max_noise = sqrt((absolute).^2 + (relative).^2);
+max_noise = max(absolute, relative);
+
+
+Weight = 1./ max_noise;
+Weight = Weight./max(Weight)';
+
+end
+
+
+function [V,x] = v(L3, L4, Rrs)
+%Solves for the one positive root of the Rrs IOP relationship see Wang, Boss, and Roesler, 2005, Applied optics.
+
+x = [-L3+sqrt(L3.^2+4*L4*Rrs)]./(2*L4);
+V = 1-1./x;
+
+end
+
+function [a_phi] = phyto_avg_field(wavelength)
+wl=400:1:850;
+wl=wl';
+
+%clusters carried out with spectra from roesler, castgna, rotggers (k means cluster =5)
+%code cluster_aphy_spectra.m
+a_f = [0.0982490909090909,0.0990339393939394,0.0998333333333333,0.100718787878788,0.101620606060606,0.102729696969697,0.103847272727273,0.104906666666667,0.105968484848485,0.107058787878788,0.108137575757576,0.109056969696970,0.109960606060606,0.110697575757576,0.111409090909091,0.111964242424242,0.112490909090909,0.112942424242424,0.113370909090909,0.113575151515151,0.113756969696970,0.113951515151515,0.114144848484848,0.114373939393939,0.114603030303030,0.114971515151515,0.115356969696970,0.115909090909091,0.116469696969697,0.117083636363636,0.117707272727273,0.118446060606061,0.119173939393939,0.119801818181818,0.120415757575758,0.120848484848485,0.121246060606061,0.121326666666667,0.121351515151515,0.121098181818182,0.120804242424242,0.120168484848485,0.119489696969697,0.118503030303030,0.117480000000000,0.116333939393939,0.115162424242424,0.113916969696970,0.112672727272727,0.111574545454546,0.110480000000000,0.109556363636364,0.108647878787879,0.107937575757576,0.107255151515151,0.106692727272727,0.106153939393939,0.105726666666667,0.105312727272727,0.104924848484848,0.104537575757576,0.104135757575758,0.103735757575758,0.103249090909091,0.102757575757576,0.102206666666667,0.101654545454545,0.100922424242424,0.100184242424243,0.0994012121212122,0.0986242424242424,0.0977030303030303,0.0967806060606061,0.0957866666666666,0.0947878787878788,0.0937490909090909,0.0927345454545454,0.0917339393939395,0.0907509090909091,0.0898478787878787,0.0889569696969697,0.0881036363636364,0.0872600000000000,0.0863551515151515,0.0854612121212122,0.0847072727272727,0.0839309090909091,0.0831030303030303,0.0822666666666667,0.0814509090909091,0.0806175757575758,0.0797133333333333,0.0787993939393939,0.0778696969696970,0.0769296969696970,0.0759806060606061,0.0750218181818181,0.0740260606060606,0.0730151515151515,0.0719854545454546,0.0709515151515152,0.0699515151515152,0.0689406060606061,0.0679090909090909,0.0668696969696970,0.0658763636363636,0.0648842424242424,0.0639278787878788,0.0629763636363636,0.0620242424242424,0.0610775757575758,0.0601484848484848,0.0592290909090909,0.0584357575757576,0.0576509090909091,0.0568260606060606,0.0560096969696970,0.0552703030303030,0.0545357575757575,0.0537921212121212,0.0530521212121212,0.0523654545454545,0.0516793939393940,0.0510030303030303,0.0503309090909091,0.0497224242424242,0.0491163636363636,0.0484830303030303,0.0478478787878788,0.0472678787878788,0.0466896969696970,0.0460987878787879,0.0455121212121212,0.0448987878787879,0.0442903030303030,0.0437042424242424,0.0431193939393939,0.0425181818181818,0.0419327272727273,0.0413830303030303,0.0408400000000000,0.0402527272727273,0.0396739393939394,0.0390836363636364,0.0385000000000000,0.0379460606060606,0.0373957575757576,0.0367406060606061,0.0360818181818182,0.0354733333333333,0.0348800000000000,0.0343200000000000,0.0337587878787879,0.0331600000000000,0.0325636363636363,0.0320175757575758,0.0314739393939394,0.0309363636363636,0.0304096969696969,0.0299915151515151,0.0295745454545454,0.0292224242424242,0.0288775757575757,0.0285284848484848,0.0281824242424242,0.0279230303030303,0.0276757575757575,0.0275315151515151,0.0273824242424242,0.0272703030303030,0.0271636363636363,0.0270963636363636,0.0270315151515151,0.0270260606060606,0.0270333333333333,0.0270660606060606,0.0271018181818181,0.0271709090909091,0.0272460606060606,0.0273218181818182,0.0274006060606060,0.0275200000000000,0.0276454545454545,0.0277272727272727,0.0278024242424242,0.0279224242424242,0.0280418181818181,0.0281393939393939,0.0282333333333333,0.0281830303030303,0.0281272727272727,0.0280672727272727,0.0280000000000000,0.0278890909090909,0.0277775757575757,0.0276193939393939,0.0274551515151515,0.0272812121212121,0.0271103030303030,0.0269660606060606,0.0268206060606060,0.0267751515151515,0.0267345454545454,0.0267393939393939,0.0267490909090909,0.0268254545454545,0.0269151515151515,0.0270618181818182,0.0272084848484848,0.0274581818181818,0.0277187878787878,0.0280090909090909,0.0283054545454545,0.0285830303030303,0.0288630303030303,0.0291084848484848,0.0293442424242424,0.0295575757575757,0.0297672727272727,0.0299775757575757,0.0301739393939394,0.0303393939393939,0.0305000000000000,0.0306272727272727,0.0307478787878788,0.0308303030303030,0.0309206060606060,0.0310636363636364,0.0312090909090909,0.0313545454545454,0.0315115151515151,0.0316666666666667,0.0318200000000000,0.0319836363636363,0.0321436363636363,0.0322187878787878,0.0322848484848485,0.0322915151515151,0.0322945454545454,0.0322309090909091,0.0321587878787878,0.0320775757575757,0.0319903030303030,0.0319163636363636,0.0318369696969697,0.0317787878787879,0.0317260606060606,0.0318224242424242,0.0319163636363636,0.0320957575757576,0.0322945454545454,0.0326296969696970,0.0329915151515151,0.0336563636363637,0.0343703030303030,0.0353939393939394,0.0364654545454545,0.0377939393939394,0.0391775757575757,0.0409533333333333,0.0427745454545454,0.0448993939393939,0.0470654545454545,0.0494048484848485,0.0517600000000000,0.0542478787878788,0.0567272727272728,0.0589860606060606,0.0612121212121212,0.0630121212121212,0.0647618181818181,0.0660012121212121,0.0671745454545455,0.0676860606060606,0.0681169696969697,0.0679036363636363,0.0676060606060606,0.0667727272727272,0.0658478787878788,0.0642806060606060,0.0626193939393940,0.0603757575757576,0.0580369696969697,0.0552375757575758,0.0523642424242424,0.0491800000000000,0.0459309090909091,0.0426121212121212,0.0392666666666666,0.0360490909090909,0.0328393939393939,0.0300139393939394,0.0272212121212121,0.0248315151515151,0.0224878787878787,0.0207539877300613,0.0188098159509202,0.0173722222222222,0.0158864197530864,0.0146493827160494,0.0134549382716049,0.0125335403726708,0.0115763975155279,0.0108503105590062,0.0101614906832298,0.00956211180124221,0.00898819875776395,0.00858562499999997,0.00814937499999998,0.00781835443037972,0.00742468354430379,0.00719108280254776,0.00691719745222930,0.00674771241830064,0.00642875816993464,0.00624304635761588,0.00593529411764706,0.00586375838926174,0.00559867549668874,0.00556232876712328,0.00521788079470199,0.00516206896551724,0.00496068965517242,0.00494071428571428,0.00464413793103449,0.00473043478260869,0.00452765957446809,0.00444202898550724,0.00424000000000000,0.00421343283582090,0.00396350364963504,0.00401923076923077,0.00381641791044776,0.00384375000000000,0.00366412213740458,0.00368306451612903,0.00345000000000000,0.00346960000000000,0.00329302325581396,0.00338114754098361,0.00324173228346457,0.00331512605042017,0.00318032786885246,0.00323596491228070,0.00303666666666667,0.00325384615384616,0.00293103448275862,0.00305377358490566,0.00292232142857143,0.00301553398058253,0.00286296296296296,0.00293367346938776,0.00269711538461539,0.00304269662921348,0.00280594059405941,0.00298876404494382,0.00277395833333334,0.00287356321839081,0.00251862745098039,0.00277500000000000,0.00253163265306123,0.00281176470588235,0.00249468085106383,0.00281428571428572,0.00247272727272727,0.00272987012987013,0.00233437500000000,0.00254615384615385,0.00207916666666667,0.00247594936708861,0.00226153846153846,0.00249210526315790,0.00210454545454546,0.00244925373134328,0.00220547945205480,0.00265000000000000,0.00190579710144928,0.00251851851851852,0.00189610389610390,0.00228688524590164,0.00177407407407407,0.00243600000000000,0.00163698630136986,0.00238000000000000,0.00152361111111111,0.00213673469387755,0.00151029411764706,0.00208269230769231,0.00174305555555556,0.00202857142857143,0.00137654320987654,0.00177833333333333,0.00155000000000000,0.00191272727272727,0.00125789473684211,0.00160175438596491,0.00113866666666667,0.00158125000000000,0.00102666666666667,0.00316521739130435,0.00285000000000000,0.00310000000000000,0.00126769230769231,0.00149767441860465,0.000845161290322580,0.000877777777777778,0.000525000000000000,0.000810204081632653,0.000664285714285714,0.00100384615384615,0.000584210526315789,0.000832075471698113,0.000665714285714286,0.000816326530612245,0.000283783783783784,0.000556451612903226,0.000359090909090909,0.000540350877192982,0.000368055555555556,0.000307142857142857,4.34210526315789e-05,0.000252083333333333,0.000131428571428571,0.000292592592592592,-1.02272727272730e-05,-0.000112903225806452,-0.000420481927710844,-0.000261016949152543,-0.000197590361445783,-0.000368333333333334,-0.000346987951807229,-0.000236206896551724,-0.000270238095238095,-0.000361666666666667,-0.000534831460674158,-0.000431343283582090,-0.000608910891089109,-0.000593421052631579,-0.000602000000000000,-0.000498507462686567,-0.000406976744186047,-0.000382539682539683,-0.000543000000000000,-0.000407692307692308,-0.000482828282828283,-0.000745333333333334,-0.000775789473684211,-0.00128906250000000,-0.00110416666666667,-0.00129230769230769,-0.00107228915662651;
+    0.451476190476190,0.455308730158730,0.459287301587302,0.463572222222222,0.468080158730159,0.472661904761905,0.477408730158730,0.482620634920635,0.487879365079365,0.492992857142857,0.497995238095238,0.502386507936508,0.506635714285714,0.510746825396825,0.514564285714286,0.517653174603175,0.520318253968254,0.522642857142857,0.524669047619047,0.526446031746032,0.527889682539682,0.528947619047619,0.529887301587302,0.530896031746032,0.531840476190476,0.533038888888889,0.534381746031746,0.535988095238096,0.537695238095238,0.539712698412698,0.541878571428572,0.543949206349207,0.545918253968254,0.547661111111111,0.549265079365080,0.550396031746032,0.551136507936508,0.551310317460317,0.550783333333333,0.549054761904762,0.546748412698413,0.543678571428572,0.539927777777778,0.535112698412699,0.529605555555556,0.523415079365079,0.516699206349206,0.509540476190476,0.502226190476190,0.495284126984127,0.488311904761905,0.481305555555555,0.474511904761905,0.468328571428572,0.462542857142857,0.457275396825397,0.452414285714286,0.447950793650794,0.443869841269841,0.440246031746032,0.436786507936508,0.433225396825397,0.429805555555556,0.426446031746032,0.423176984126984,0.419964285714286,0.416826984126984,0.413506349206349,0.410158730158730,0.406692063492063,0.403302380952381,0.399936507936508,0.396566666666667,0.393146825396826,0.389667460317461,0.386208730158730,0.382991269841270,0.379811111111111,0.376833333333333,0.374222222222222,0.371725396825397,0.369321428571429,0.367053968253968,0.364631746031746,0.362345238095238,0.360369047619048,0.358178571428571,0.355723809523810,0.353183333333333,0.350688095238095,0.348008730158730,0.345207142857143,0.342269841269841,0.339370634920635,0.336346031746032,0.332961111111111,0.329471428571429,0.325835714285714,0.321987301587302,0.317915079365080,0.313717460317460,0.309611904761905,0.305352380952381,0.300679365079365,0.295848412698413,0.291092857142857,0.286243650793651,0.281431746031746,0.276580158730159,0.271683333333334,0.266826190476191,0.261884126984127,0.257024603174603,0.252250000000000,0.247546031746032,0.242990476190476,0.238549206349206,0.234240476190476,0.230016666666667,0.225819047619048,0.221714285714286,0.217832539682540,0.214031746031746,0.210184126984127,0.206442857142857,0.203135714285714,0.199934126984127,0.196573015873016,0.193276190476190,0.190361904761905,0.187512698412698,0.184666666666667,0.181925396825397,0.179202380952381,0.176614285714286,0.174233333333333,0.171934126984127,0.169734920634921,0.167677777777778,0.165710317460318,0.163825396825397,0.161916666666667,0.160095238095238,0.158236507936508,0.156430158730159,0.154821428571429,0.153273809523810,0.151696031746032,0.150109523809524,0.148403174603175,0.146808730158730,0.145361111111111,0.143939682539683,0.142562698412698,0.141265873015873,0.140147619047619,0.139030158730159,0.137954761904762,0.137024603174603,0.136434920634921,0.135836507936508,0.135491269841270,0.135247619047619,0.135005555555556,0.134788095238095,0.134715079365079,0.134784126984127,0.135094444444444,0.135365873015873,0.135643650793651,0.136058730158730,0.136601587301587,0.137167460317460,0.137812698412698,0.138570634920635,0.139327777777778,0.140068253968254,0.140750793650794,0.141530952380952,0.142325396825397,0.143145238095238,0.144089682539683,0.145042063492063,0.145909523809524,0.146749206349206,0.147556349206349,0.148425396825397,0.149165873015873,0.149900000000000,0.150616666666667,0.151311111111111,0.151745238095238,0.152143650793651,0.152608730158730,0.153036507936508,0.153441269841270,0.153796825396825,0.154045238095238,0.154288888888889,0.154664285714286,0.154980158730159,0.155642857142857,0.156412698412698,0.157090476190476,0.157851587301587,0.158777777777778,0.159749206349206,0.161120634920635,0.162566666666667,0.164100793650794,0.165728571428571,0.167461904761905,0.169206349206349,0.170854761904762,0.172520634920635,0.174146825396825,0.175678571428571,0.177003968253968,0.178220634920635,0.179499206349206,0.180624603174603,0.181619047619048,0.182557142857143,0.183457936507937,0.184226984126984,0.185057142857143,0.185907936507937,0.186614285714286,0.187292857142857,0.187661111111111,0.188091269841270,0.188439682539683,0.188720634920635,0.188848412698413,0.188908730158730,0.188850793650794,0.188726190476190,0.188396825396825,0.188015873015873,0.187436507936508,0.186743650793651,0.186056349206349,0.185350793650794,0.184626984126984,0.183856349206349,0.183103174603175,0.182416666666667,0.182197619047619,0.182056349206349,0.182232539682540,0.182647619047619,0.183616666666667,0.184934126984127,0.186988095238095,0.189627777777778,0.193232539682540,0.197533333333333,0.202669841269841,0.208531746031746,0.215440476190476,0.223022222222222,0.231473015873016,0.240442063492064,0.249915873015873,0.259636507936508,0.269492857142857,0.279218253968254,0.288530952380952,0.297430158730159,0.305357142857143,0.312676984126984,0.318819841269842,0.324219047619048,0.328347619047619,0.331649206349207,0.333350793650794,0.334178571428572,0.333350000000000,0.331534920634921,0.327943650793651,0.323188095238095,0.316769841269842,0.308974603174603,0.299456349206349,0.288665079365080,0.276219047619048,0.262646825396825,0.248474603174603,0.233607142857143,0.218568253968254,0.203318253968254,0.188449206349206,0.173923015873016,0.160026190476190,0.146675396825397,0.135496800000000,0.123940000000000,0.113894400000000,0.104737600000000,0.0965272000000001,0.0883150793650794,0.0827524193548388,0.0764282258064516,0.0716260162601626,0.0667837398373984,0.0633603305785124,0.0592694214876033,0.0556000000000000,0.0521876033057851,0.0492636363636364,0.0466942148760331,0.0442520661157025,0.0418512396694215,0.0398358333333333,0.0376650000000000,0.0358308333333333,0.0338834710743801,0.0325675000000000,0.0310983333333333,0.0297366666666666,0.0282741666666666,0.0270025210084033,0.0257714285714285,0.0247655462184874,0.0237764705882353,0.0231760683760684,0.0221358974358974,0.0213577586206896,0.0200830508474576,0.0194612068965517,0.0185376068376068,0.0179801724137931,0.0172931034482758,0.0167629310344827,0.0160389830508474,0.0159336283185840,0.0153451327433628,0.0155112149532710,0.0144605504587156,0.0143905660377358,0.0138092592592592,0.0139171428571428,0.0129612612612612,0.0134336538461538,0.0129103773584905,0.0131737864077670,0.0120180180180180,0.0123923076923077,0.0117638888888889,0.0125447916666666,0.0114405940594059,0.0120031914893617,0.0111370000000000,0.0116086956521739,0.0105714285714286,0.0108608695652174,0.0100989795918367,0.0107706521739130,0.0100010000000000,0.0104684782608696,0.00965360824742268,0.0100311111111111,0.00900104166666667,0.00898172043010753,0.00836354166666667,0.00890666666666666,0.00855531914893617,0.00867528089887640,0.00800105263157895,0.00870823529411764,0.00795869565217391,0.00805294117647058,0.00712808988764045,0.00741604938271605,0.00659775280898877,0.00691927710843373,0.00615164835164835,0.00628255813953488,0.00573296703296703,0.00597411764705882,0.00522065217391305,0.00565952380952381,0.00550109890109890,0.00588915662650603,0.00503666666666667,0.00557317073170732,0.00533604651162791,0.00600000000000000,0.00558928571428572,0.00599375000000000,0.00552022471910112,0.00594197530864197,0.00551807228915663,0.00643026315789474,0.00594777777777778,0.00607682926829268,0.00525384615384615,0.00567375000000000,0.00536385542168675,0.00726984126984127,0.00687187500000000,0.00684677419354839,0.00514880952380952,0.00542077922077922,0.00455882352941176,0.00449878048780488,0.00408901098901099,0.00478860759493671,0.00413707865168539,0.00446547619047619,0.00413152173913043,0.00493448275862069,0.00481011235955056,0.00511341463414634,0.00444888888888889,0.00530240963855422,0.00465217391304348,0.00493536585365854,0.00428426966292135,0.00380246913580247,0.00275777777777778,0.00333333333333333,0.00338764044943820,0.00347500000000000,0.00286213592233010,0.00207471264367816,0.00107666666666667,0.00124431818181818,0.00129000000000000,0.00123707865168539,0.00141182795698925,0.00132247191011236,0.00103039215686275,0.00111443298969072,0.00157920792079208,0.00126404494382022,0.000407843137254901,0.000761797752808989,0.00101938775510204,0.00111978021978022,0.000235643564356436,0.000543181818181818,0.000579166666666666,0.000969662921348315,0.000640384615384615,0.000246739130434783,0.000192156862745098,0.000697368421052631,0.000914000000000000,-0.000307894736842105,-0.00166666666666667;
+    0.331266169154229,0.334414925373134,0.337691542288557,0.341144278606965,0.344744776119403,0.348406467661692,0.352191542288558,0.356424378109453,0.360673134328359,0.364804477611940,0.368864179104478,0.372378606965174,0.375764179104478,0.378885074626866,0.381780597014926,0.384274129353234,0.386474626865672,0.388340796019900,0.390025870646766,0.391430348258707,0.392623880597015,0.393692537313433,0.394739800995025,0.395913930348259,0.397119900497513,0.398552736318409,0.400136318407961,0.401997014925374,0.403968159203981,0.406180099502488,0.408494029850747,0.410883084577114,0.413198009950249,0.415221890547264,0.417077114427861,0.418490049751244,0.419557711442786,0.419998009950249,0.419884577114428,0.418762686567164,0.417213432835821,0.415032338308458,0.412396019900497,0.408969154228855,0.405114925373135,0.400799502487562,0.396223383084578,0.391390049751244,0.386509950248756,0.382022885572139,0.377564179104478,0.373130348258707,0.368841791044776,0.365054228855722,0.361492039800996,0.358223880597015,0.355143283582090,0.352347263681592,0.349717412935324,0.347192537313433,0.344687562189055,0.342142786069652,0.339608955223881,0.336900497512438,0.334188059701493,0.331469154228856,0.328732338308458,0.325783582089552,0.322789552238806,0.319583582089552,0.316380099502488,0.313133830845771,0.309851741293532,0.306444278606965,0.302989552238806,0.299519402985075,0.296198009950249,0.292894029850746,0.289707960199005,0.286796019900498,0.283973134328358,0.281275621890548,0.278688557213931,0.275990049751244,0.273394527363184,0.271047263681592,0.268594527363184,0.266014925373134,0.263420895522388,0.260928855721393,0.258349751243781,0.255714427860697,0.252996019900498,0.250234825870647,0.247413432835821,0.244441791044776,0.241423383084577,0.238404975124378,0.235282587064677,0.231974129353234,0.228632835820896,0.225398507462686,0.222113432835821,0.218607462686567,0.215040298507463,0.211544278606965,0.208023383084577,0.204582587064677,0.201143283582090,0.197768656716418,0.194434328358209,0.190988059701493,0.187608457711443,0.184448756218906,0.181337810945274,0.178232338308458,0.175200497512438,0.172334328358209,0.169514427860696,0.166780597014925,0.164083084577114,0.161375124378110,0.158697512437811,0.156048756218905,0.153453233830846,0.151096019900498,0.148772636815920,0.146348258706468,0.143954228855721,0.141839800995025,0.139731840796020,0.137525373134328,0.135352238805970,0.133160696517413,0.131024875621891,0.128986567164179,0.126974626865672,0.125050746268657,0.123181592039801,0.121364676616915,0.119590547263682,0.117739303482587,0.115919402985075,0.114083582089552,0.112269154228856,0.110580597014925,0.108933333333333,0.107254726368159,0.105574626865672,0.103822885572139,0.102154228855722,0.100603980099503,0.0991039800995024,0.0976039800995025,0.0961636815920398,0.0948736318407961,0.0936243781094528,0.0924368159203980,0.0913661691542288,0.0905363184079602,0.0897278606965174,0.0890945273631841,0.0885378109452736,0.0880830845771145,0.0876696517412935,0.0873611940298508,0.0871363184079602,0.0871572139303483,0.0871686567164179,0.0872502487562190,0.0874044776119403,0.0877228855721393,0.0880751243781095,0.0885447761194030,0.0891039800995025,0.0896930348258706,0.0903029850746268,0.0909213930348259,0.0916497512437811,0.0923373134328358,0.0930626865671641,0.0938477611940298,0.0946298507462686,0.0954184079601991,0.0961641791044775,0.0968174129353233,0.0974786069651741,0.0980258706467661,0.0985069651741293,0.0989114427860697,0.0992646766169154,0.0993174129353234,0.0993318407960199,0.0993472636815921,0.0993134328358208,0.0992298507462686,0.0990731343283582,0.0988407960199005,0.0986169154228855,0.0985199004975124,0.0984034825870647,0.0986293532338309,0.0989189054726368,0.0991303482587065,0.0994263681592040,0.0998756218905473,0.100404477611940,0.101302985074627,0.102278606965174,0.103388557213930,0.104604477611940,0.105863184079602,0.107144278606965,0.108386567164179,0.109654228855721,0.110896517412935,0.112105970149254,0.113217412935323,0.114264676616915,0.115220895522388,0.116067661691542,0.116879104477612,0.117662189054726,0.118399004975125,0.119041791044776,0.119738805970149,0.120461691542289,0.121153233830846,0.121852238805970,0.122423383084577,0.123055721393035,0.123566666666667,0.124041791044776,0.124445771144279,0.124823383084577,0.125109452736318,0.125322388059702,0.125352238805970,0.125318905472637,0.125076616915423,0.124713930348259,0.124310447761194,0.123838805970149,0.123282587064677,0.122666666666667,0.122056716417911,0.121479601990050,0.121269154228856,0.121120398009950,0.121255721393035,0.121575124378109,0.122241293532338,0.123212935323383,0.124975621890547,0.127166169154229,0.130200000000000,0.133748756218906,0.137975621890547,0.142733333333333,0.148412935323383,0.154591542288557,0.161540796019901,0.168894029850746,0.176704975124378,0.184722388059702,0.192939800995025,0.201092039800995,0.208817910447761,0.216282089552239,0.223023383084577,0.229311940298507,0.234426865671642,0.238926865671642,0.242181592039801,0.244716915422885,0.245759203980100,0.245966666666667,0.244564676616916,0.242259701492537,0.238175124378110,0.233152238805970,0.226616915422886,0.219109950248756,0.210237313432836,0.200562189054726,0.189818407960199,0.178500497512438,0.166925870646766,0.155101990049751,0.143515920398010,0.131983582089552,0.121084079601990,0.110563681592040,0.100825373134328,0.0915761194029853,0.0833129353233831,0.0755970149253732,0.0690731343283583,0.0631174129353234,0.0578014925373135,0.0529398009950249,0.0487970000000000,0.0447720000000000,0.0416125628140703,0.0385537688442211,0.0357351758793970,0.0331829145728643,0.0310201005025126,0.0290447236180904,0.0276065989847716,0.0260756345177665,0.0247055837563452,0.0232646464646464,0.0223071794871795,0.0211174358974358,0.0201628865979381,0.0190265306122448,0.0182025510204081,0.0173395939086294,0.0167096938775510,0.0159494897959183,0.0152618556701031,0.0145123076923076,0.0141556701030927,0.0137474226804123,0.0135285714285714,0.0128573684210526,0.0126096774193548,0.0120748663101604,0.0118535519125683,0.0112999999999999,0.0112131868131868,0.0106229946524064,0.0107379888268156,0.0102967032967032,0.0101193181818181,0.00950833333333329,0.00995575757575754,0.00930532544378694,0.00947852760736194,0.00894593023255809,0.00922699386503064,0.00886287425149696,0.00901312499999997,0.00845535714285710,0.00869378881987575,0.00811117647058819,0.00837749999999996,0.00803734939759031,0.00857094594594591,0.00797142857142853,0.00828124999999997,0.00760784313725486,0.00788499999999997,0.00720201342281876,0.00746408450704224,0.00685384615384613,0.00763405797101448,0.00716122448979590,0.00775384615384615,0.00707985611510792,0.00791487603305784,0.00700808823529412,0.00753750000000000,0.00635447761194030,0.00711083333333333,0.00662030075187970,0.00668951612903226,0.00605112781954887,0.00649008264462809,0.00564718309859155,0.00643508771929824,0.00551920000000000,0.00595803571428571,0.00531311475409836,0.00577735849056603,0.00498803418803419,0.00561359223300970,0.00512807017543860,0.00551844660194175,0.00466495726495726,0.00563404255319149,0.00484107142857143,0.00515757575757576,0.00404310344827586,0.00465445544554455,0.00394793388429752,0.00521063829787234,0.00436034482758621,0.00524285714285714,0.00448974358974359,0.00506699029126214,0.00448956521739130,0.00557052631578947,0.00464672131147541,0.00513177570093458,0.00439512195121951,0.00538191489361702,0.00441869158878505,0.00745000000000000,0.00684057971014493,0.00684558823529412,0.00468468468468469,0.00518260869565218,0.00412090909090909,0.00475434782608696,0.00400535714285714,0.00462105263157895,0.00351083333333333,0.00414200000000000,0.00332086956521739,0.00481363636363636,0.00395643564356436,0.00401170212765957,0.00277886178861789,0.00345405405405405,0.00298449612403101,0.00367961165048544,0.00320263157894737,0.00320212765957447,0.00207217391304348,0.00264375000000000,0.00238898305084746,0.00267019230769231,0.00212592592592593,0.00151711711711712,0.000526923076923077,0.00109905660377358,0.00109685039370079,0.000929629629629629,0.000590769230769230,0.000963478260869565,0.000810869565217392,0.00110082644628099,0.00132086330935252,0.00129734513274336,0.000327338129496402,0.000504132231404958,0.000448648648648648,0.00103565217391304,0.000608823529411765,0.000529661016949152,0.000122535211267606,0.000299186991869919,-1.88811188811191e-05,-0.000223529411764706,-0.000312318840579710,-0.000557971014492754,-0.000565656565656566,-0.00127142857142857,-0.00173033707865169;
+    0.270728155339806,0.273179611650485,0.275708737864078,0.278474757281553,0.281362135922330,0.284311650485437,0.287329126213592,0.290593203883495,0.293853398058252,0.297115533980583,0.300308737864078,0.303051456310680,0.305713592233010,0.308100000000000,0.310308737864078,0.312282524271845,0.314034951456311,0.315432038834951,0.316677669902913,0.317588349514563,0.318300970873786,0.318933009708738,0.319514563106796,0.320137864077670,0.320720388349515,0.321435922330097,0.322223300970874,0.323109708737864,0.324034951456311,0.325345631067961,0.326732038834951,0.328021359223301,0.329258252427185,0.330277669902913,0.331196116504854,0.331942718446602,0.332466019417476,0.332315533980583,0.331786407766990,0.330642718446602,0.329180582524272,0.327040776699029,0.324502912621359,0.321211650485437,0.317544660194175,0.313463106796116,0.309109708737864,0.304525242718447,0.299848543689320,0.295331067961165,0.290809708737864,0.286462135922330,0.282244660194175,0.278433980582524,0.274833980582524,0.271649514563107,0.268692233009709,0.266075728155340,0.263668932038835,0.261387378640777,0.259211650485437,0.257115533980582,0.255100000000000,0.253108737864078,0.251182524271845,0.249203883495146,0.247277669902913,0.245230097087379,0.243199029126214,0.241081553398058,0.239003883495146,0.236805825242718,0.234643689320388,0.232480582524272,0.230334951456311,0.228165048543689,0.226138834951456,0.224112621359223,0.222183495145631,0.220489320388349,0.218891262135922,0.217409708737864,0.216004854368932,0.214490291262136,0.213027184466019,0.211700970873786,0.210266019417476,0.208768932038835,0.207241747572816,0.205674757281553,0.204000970873786,0.202253398058252,0.200392233009709,0.198413592233010,0.196347572815534,0.194192233009709,0.191958252427184,0.189619417475728,0.187156310679612,0.184547572815534,0.181852427184466,0.179268932038835,0.176611650485437,0.173651456310680,0.170606796116505,0.167754368932039,0.164862135922330,0.161920388349515,0.158976699029126,0.156033980582524,0.153123300970874,0.150224271844660,0.147370873786408,0.144645631067961,0.141959223300971,0.139335922330097,0.136771844660194,0.134344660194175,0.131952427184466,0.129630097087379,0.127357281553398,0.125130097087379,0.122955339805825,0.120815533980583,0.118737864077670,0.116849514563107,0.115000000000000,0.113131067961165,0.111308737864078,0.109684466019417,0.108081553398058,0.106477669902913,0.104900970873786,0.103362135922330,0.101874757281553,0.100493203883495,0.0991582524271845,0.0978087378640777,0.0965097087378641,0.0952854368932039,0.0940970873786408,0.0928864077669903,0.0917097087378640,0.0904194174757282,0.0891601941747572,0.0880718446601942,0.0870048543689320,0.0858223300970874,0.0846427184466019,0.0834922330097087,0.0824135922330097,0.0813660194174757,0.0803456310679611,0.0793514563106796,0.0783961165048544,0.0775174757281553,0.0766873786407767,0.0759398058252428,0.0752650485436893,0.0747407766990291,0.0742223300970874,0.0738553398058253,0.0735456310679612,0.0733592233009709,0.0732019417475728,0.0730407766990291,0.0729203883495145,0.0729689320388350,0.0730058252427184,0.0731009708737864,0.0732475728155339,0.0734737864077669,0.0737184466019417,0.0739951456310679,0.0743252427184466,0.0747281553398058,0.0751097087378641,0.0755300970873787,0.0760029126213592,0.0764699029126213,0.0769417475728155,0.0774194174757281,0.0778679611650485,0.0782825242718446,0.0786679611650485,0.0791145631067960,0.0795902912621359,0.0799378640776698,0.0802757281553398,0.0805310679611650,0.0807873786407767,0.0809106796116505,0.0810427184466019,0.0811961165048543,0.0813485436893203,0.0814757281553398,0.0815757281553397,0.0815970873786408,0.0816533980582524,0.0818563106796116,0.0820485436893203,0.0824864077669903,0.0829834951456311,0.0835000000000000,0.0840825242718447,0.0847941747572816,0.0855679611650486,0.0865126213592233,0.0875019417475728,0.0885912621359224,0.0897466019417476,0.0909349514563107,0.0921320388349515,0.0932990291262136,0.0944359223300972,0.0955621359223302,0.0966378640776699,0.0975601941747573,0.0984019417475728,0.0991980582524272,0.0998815533980583,0.100497087378641,0.101046601941748,0.101603883495146,0.102041747572815,0.102383495145631,0.102718446601942,0.102977669902913,0.103200000000000,0.103322330097087,0.103465048543689,0.103544660194175,0.103569902912621,0.103478640776699,0.103402912621359,0.103238834951456,0.103033009708738,0.102761165048544,0.102485436893204,0.102091262135922,0.101676699029126,0.101246601941748,0.100869902912621,0.100566019417476,0.100292233009709,0.100115533980583,0.100013592233010,0.100278640776699,0.100633980582524,0.101168932038835,0.101859223300971,0.102823300970874,0.103999029126214,0.105804854368932,0.107926213592233,0.110647572815534,0.113756310679612,0.117421359223301,0.121480582524272,0.126289320388350,0.131450485436893,0.137257281553398,0.143326213592233,0.149735922330097,0.156257281553398,0.162906796116505,0.169449514563107,0.175634951456311,0.181567961165048,0.186754368932039,0.191575728155340,0.195476699029126,0.198928155339806,0.201344660194175,0.203251456310680,0.204098058252427,0.204433009708738,0.203595145631068,0.202189320388349,0.199454368932039,0.196104854368932,0.191642718446602,0.186440776699029,0.180010679611650,0.172927184466019,0.164961165048544,0.156434951456311,0.147485436893204,0.138150485436893,0.128780582524272,0.119291262135922,0.110217475728155,0.101315533980583,0.0929941747572816,0.0849708737864076,0.0777330097087379,0.0708941747572816,0.0649533980582524,0.0594912621359223,0.0545815533980582,0.0500407766990291,0.0473220000000000,0.0435099999999999,0.0407181818181818,0.0377989898989898,0.0350979797979798,0.0323309999999999,0.0308551020408163,0.0286161616161616,0.0269747474747474,0.0252709999999999,0.0241515151515151,0.0228606060606060,0.0218244897959184,0.0206500000000000,0.0196908163265306,0.0188132653061224,0.0181092783505154,0.0172701030927835,0.0165556701030927,0.0156642857142857,0.0153105263157894,0.0144552083333333,0.0143333333333333,0.0138333333333333,0.0134217391304347,0.0127451612903225,0.0122763440860215,0.0116094736842105,0.0113849462365591,0.0108585106382979,0.0111681818181818,0.0108227272727273,0.0107488372093023,0.00994285714285714,0.0101258823529412,0.00952183908045977,0.0100897435897436,0.00935375000000000,0.00950131578947368,0.00896329113924051,0.00913733333333332,0.00862337662337663,0.00916857142857142,0.00848266666666667,0.00903235294117646,0.00818767123287671,0.00863432835820895,0.00784459459459460,0.00854153846153846,0.00746849315068493,0.00801969696969697,0.00748571428571429,0.00765076923076923,0.00698840579710145,0.00776206896551724,0.00683692307692308,0.00746610169491526,0.00662388059701493,0.00727894736842106,0.00623125000000000,0.00697142857142857,0.00582089552238806,0.00665535714285714,0.00563076923076923,0.00637857142857143,0.00559843750000000,0.00664117647058824,0.00539016393442623,0.00608490566037736,0.00541639344262295,0.00593653846153846,0.00497068965517242,0.00581063829787234,0.00495185185185185,0.00585952380952381,0.00426481481481482,0.00518837209302326,0.00448235294117647,0.00542926829268293,0.00410740740740741,0.00512857142857143,0.00381666666666667,0.00526153846153846,0.00396600000000000,0.00544210526315790,0.00458260869565218,0.00582564102564103,0.00407321428571429,0.00512380952380952,0.00404800000000000,0.00524871794871795,0.00435531914893617,0.00547692307692308,0.00423773584905660,0.00502000000000000,0.00370204081632653,0.00490909090909091,0.00306875000000000,0.00657826086956522,0.00626956521739131,0.00700476190476191,0.00382000000000000,0.00514687500000000,0.00320666666666667,0.00367631578947368,0.00273207547169811,0.00300416666666667,0.00234067796610170,0.00348181818181818,0.00296981132075472,0.00439756097560976,0.00343846153846154,0.00386190476190476,0.00260377358490566,0.00461666666666667,0.00336530612244898,0.00437837837837838,0.00272631578947368,0.00268085106382979,0.00180892857142857,0.00232765957446808,0.00190172413793103,0.00222666666666667,0.00150000000000000,0.00110625000000000,0.000214285714285714,0.000483333333333333,0.000343749999999999,0.000275925925925925,-8.50746268656721e-05,0.000669090909090909,0.000780000000000000,0.00127346938775510,0.00127000000000000,0.00134509803921569,0.000686956521739130,0.000779661016949152,0.000263888888888888,0.00114081632653061,0.000998360655737705,0.00103750000000000,0.000121212121212121,0.000362962962962963,-0.000150746268656717,-6.27450980392158e-05,-0.000280303030303030,-0.000230769230769231,-0.000581818181818182,-0.000934782608695652,-0.00123636363636364;
+    0.119081818181818,0.120709090909091,0.122372727272727,0.123690909090909,0.125050000000000,0.126836363636364,0.128663636363636,0.130131818181818,0.131613636363636,0.133627272727273,0.135640909090909,0.137140909090909,0.138613636363636,0.140072727272727,0.141500000000000,0.142590909090909,0.143645454545455,0.144500000000000,0.145322727272727,0.146040909090909,0.146727272727273,0.147518181818182,0.148295454545455,0.148795454545455,0.149295454545455,0.150177272727273,0.151077272727273,0.151913636363636,0.152772727272727,0.153645454545455,0.154540909090909,0.155263636363636,0.155981818181818,0.156981818181818,0.157963636363636,0.158563636363636,0.159109090909091,0.159459090909091,0.159718181818182,0.159500000000000,0.159177272727273,0.158295454545455,0.157300000000000,0.156268181818182,0.155122727272727,0.153404545454545,0.151595454545455,0.149990909090909,0.148327272727273,0.146818181818182,0.145290909090909,0.143677272727273,0.142081818181818,0.140963636363636,0.139890909090909,0.138827272727273,0.137813636363636,0.136995454545455,0.136231818181818,0.135490909090909,0.134786363636364,0.134300000000000,0.133845454545455,0.133027272727273,0.132231818181818,0.131404545454545,0.130600000000000,0.129877272727273,0.129163636363636,0.128222727272727,0.127290909090909,0.126377272727273,0.125477272727273,0.124500000000000,0.123527272727273,0.122559090909091,0.121618181818182,0.120927272727273,0.120254545454545,0.119504545454545,0.118768181818182,0.117972727272727,0.117181818181818,0.116586363636364,0.115990909090909,0.115586363636364,0.115145454545455,0.114386363636364,0.113609090909091,0.112954545454545,0.112277272727273,0.111809090909091,0.111318181818182,0.110636363636364,0.109936363636364,0.109131818181818,0.108318181818182,0.107627272727273,0.106918181818182,0.105877272727273,0.104827272727273,0.103845454545455,0.102859090909091,0.101977272727273,0.101090909090909,0.100113636363636,0.0991318181818182,0.0982500000000000,0.0973636363636364,0.0962772727272727,0.0951954545454545,0.0940681818181818,0.0929363636363636,0.0919727272727273,0.0910136363636364,0.0901000000000000,0.0891909090909091,0.0883772727272727,0.0875636363636363,0.0867727272727273,0.0859772727272727,0.0852545454545455,0.0845227272727273,0.0837772727272727,0.0830363636363636,0.0823772727272727,0.0817227272727273,0.0809590909090909,0.0801954545454545,0.0796000000000000,0.0790090909090909,0.0782772727272727,0.0775545454545455,0.0770272727272727,0.0765136363636363,0.0757454545454546,0.0749954545454545,0.0745136363636364,0.0740500000000000,0.0734681818181818,0.0729000000000000,0.0724000000000000,0.0719090909090909,0.0713363636363636,0.0707590909090909,0.0701636363636363,0.0695681818181818,0.0689318181818182,0.0682727272727273,0.0676500000000000,0.0670136363636364,0.0664000000000000,0.0657545454545455,0.0647863636363636,0.0637954545454545,0.0630409090909091,0.0622681818181818,0.0613545454545454,0.0604454545454545,0.0595954545454545,0.0587545454545454,0.0581409090909091,0.0575636363636364,0.0568636363636363,0.0562090909090909,0.0558227272727273,0.0554681818181818,0.0552454545454546,0.0550363636363636,0.0548863636363636,0.0547136363636364,0.0542818181818182,0.0537681818181818,0.0533227272727273,0.0527818181818182,0.0522181818181818,0.0515500000000000,0.0509136363636364,0.0501954545454545,0.0491272727272727,0.0480136363636364,0.0470909090909091,0.0461818181818182,0.0454863636363636,0.0448454545454546,0.0441090909090909,0.0434545454545455,0.0428090909090909,0.0422500000000000,0.0417500000000000,0.0413318181818182,0.0408545454545455,0.0404363636363637,0.0402090909090909,0.0400272727272727,0.0397136363636364,0.0394227272727273,0.0391863636363636,0.0389636363636364,0.0389000000000000,0.0388454545454546,0.0389000000000000,0.0389727272727273,0.0389500000000000,0.0389363636363637,0.0389409090909091,0.0389545454545455,0.0394181818181818,0.0398909090909091,0.0401909090909091,0.0405045454545455,0.0409090909090909,0.0413227272727273,0.0417590909090909,0.0421954545454546,0.0425363636363636,0.0428818181818182,0.0430818181818182,0.0432681818181818,0.0435318181818182,0.0437727272727273,0.0440045454545455,0.0442227272727273,0.0444136363636364,0.0445954545454546,0.0448090909090909,0.0450318181818182,0.0452681818181818,0.0455000000000000,0.0456500000000000,0.0458000000000000,0.0459181818181818,0.0460181818181818,0.0461136363636364,0.0462136363636364,0.0463545454545455,0.0464772727272727,0.0464636363636364,0.0464500000000000,0.0462954545454545,0.0461363636363636,0.0460272727272727,0.0459181818181818,0.0458000000000000,0.0456863636363636,0.0456681818181818,0.0456590909090909,0.0456909090909091,0.0457363636363636,0.0461181818181818,0.0465227272727273,0.0471954545454546,0.0479045454545455,0.0488227272727273,0.0497681818181818,0.0508090909090909,0.0519000000000000,0.0534318181818182,0.0550181818181818,0.0572045454545455,0.0594545454545455,0.0619954545454545,0.0645818181818182,0.0671363636363637,0.0697363636363636,0.0725136363636363,0.0752909090909091,0.0780863636363636,0.0808590909090909,0.0829227272727273,0.0849454545454546,0.0864636363636364,0.0879363636363636,0.0886909090909091,0.0893863636363636,0.0895090909090909,0.0895454545454545,0.0890090909090909,0.0883545454545454,0.0869681818181818,0.0854227272727272,0.0831363636363636,0.0806681818181818,0.0775318181818182,0.0741954545454545,0.0703727272727273,0.0663818181818182,0.0625681818181818,0.0586272727272727,0.0542636363636363,0.0498590909090909,0.0458000000000000,0.0417545454545455,0.0383409090909091,0.0349863636363637,0.0321363636363636,0.0293863636363636,0.0269863636363636,0.0247136363636364,0.0227272727272727,0.0208318181818182,0.0192045454545455,0.0176681818181818,0.0166727272727273,0.0157454545454546,0.0146318181818182,0.0135727272727273,0.0127318181818182,0.0119227272727273,0.0113227272727273,0.0107590909090909,0.0103363636363636,0.00992272727272728,0.00996190476190476,0.00945238095238096,0.00881428571428572,0.00777272727272728,0.00739090909090909,0.00703181818181818,0.00677272727272727,0.00650909090909091,0.00612727272727273,0.00576818181818182,0.00579523809523810,0.00570476190476191,0.00540000000000000,0.00509047619047619,0.00487619047619048,0.00463636363636364,0.00444285714285714,0.00410000000000000,0.00404285714285714,0.00398571428571429,0.00403000000000000,0.00392500000000000,0.00356315789473684,0.00301000000000000,0.00296315789473684,0.00272500000000000,0.00278947368421053,0.00275789473684211,0.00280000000000000,0.00264210526315790,0.00244210526315789,0.00211428571428572,0.00229000000000000,0.00240500000000000,0.00264705882352941,0.00241764705882353,0.00241176470588235,0.00197777777777778,0.00229285714285714,0.00234285714285714,0.00220000000000000,0.00168000000000000,0.00180769230769231,0.00169375000000000,0.00160666666666667,0.00140000000000000,0.00132666666666667,0.00123333333333333,0.00169230769230769,0.00202857142857143,0.00266000000000000,0.00222500000000000,0.00226000000000000,0.00186923076923077,0.00204000000000000,0.00170909090909091,0.00145454545454545,0.00100833333333333,0.00130000000000000,0.00133000000000000,0.000900000000000000,0.000600000000000000,0.000225000000000000,0.000184615384615385,0.000542857142857143,0.000377777777777778,0.000600000000000000,0.000744444444444445,0.000516666666666667,0.000245454545454545,0.000320000000000000,0.000383333333333333,-0.000500000000000000,-0.000785714285714286,0.000316666666666667,0.00109090909090909,0.00168000000000000,0.00154285714285714,0.00243333333333333,0.00213333333333333,0.00144285714285714,0.000422222222222222,0.000400000000000000,0.000255555555555555,0.000300000000000000,0.000214285714285714,0.00225000000000000,0.00235000000000000,0.00230000000000000,1.11111111111112e-05,-0.000800000000000000,-0.00115833333333333,-0.00195000000000000,-0.00238571428571429,-0.00151666666666667,-7.77777777777778e-05,-0.00105000000000000,-0.00139230769230769,-0.000675000000000000,7.77777777777778e-05,-0.000800000000000000,-0.00136000000000000,-0.00105833333333333,-0.000825000000000000,-0.00122727272727273,-0.00160000000000000,-0.00180000000000000,-0.00121428571428571,-0.00151538461538462,-0.00149375000000000,-0.00115000000000000,-0.000513333333333333,-0.00149166666666667,-0.00194666666666667,-0.00252307692307692,-0.00249375000000000,-0.00278181818181818,-0.00216923076923077,-0.00216666666666667,-0.00113571428571429,-0.00168181818181818,-0.00163846153846154,-0.00285833333333333,-0.00298888888888889,-0.00233571428571429,-0.00215000000000000,-0.00197692307692308,-0.00257500000000000,-0.00230769230769231,-0.00181333333333333,-0.00120714285714286,-0.000378947368421053,-0.00258666666666667,-0.00471250000000000,-0.00477272727272727,-0.00276923076923077,-0.00318750000000000,-0.00310000000000000];
+a_f = a_f./a_f(:,1); %normalize at 400nm
+%a_f = a_f./a_f(:,251); %normalize at 650nm
+
+for i = 1:size(a_f,1)
+    a_phi(i,:)=interp1(wl,a_f(i,:),wavelength,'linear','extrap')';%/1.25;
+end
+
+end
+
+
+function [h] = Array_h(a_sea_water, bb_sea_water, V3)
+%setup the array of known parameter for the inversion see Wang, Boss, and Roesler, 2005, Applied optics.
+
+h = - ([a_sea_water'] + [bb_sea_water'].*[V3]');
+
+end
