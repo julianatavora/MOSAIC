@@ -93,6 +93,16 @@ if actualDims == 3
     chkFile  = 'results_checkpoint.mat'; % rolling file
     %load('/Users/jtavorab/Documents/MOSAIC_v2/results_checkpoint_smallvenice.mat');
 
+    % Precompute fallback temperature range for NaN-temp pixels once,
+    % avoiding global stat recomputation inside the per-pixel loop.
+    if any(~isnan(temp(:)))
+        temp_gm = round(mean(temp,'all','omitnan'), 0);
+        temp_gs = round(std(temp, 0,'all','omitnan'), 0);
+        temp_nan_fallback = (temp_gm - temp_gs):1:(temp_gm + temp_gs);
+    else
+        temp_nan_fallback = 5:1:34;
+    end
+
     for jj = size(rrs,2):-1:1
         for ii = size(rrs,1):-1:1
 
@@ -102,12 +112,7 @@ if actualDims == 3
             wv          = wavelength(id);
             temp_pix    = temp(ii,jj);
             if isnan(temp_pix)
-                if any(~isnan(temp))
-                    temp_pix = round((mean(temp,'all','omitnan')-std(temp,0,'all','omitnan')),0):1:round((mean(temp,'all','omitnan')+std(temp,0,'all','omitnan')),0); %mean(temp,'all','omitnan');
-                else
-                    temp_pix = 5:1:34;
-                    %temp_pix = 12:1:34;
-                end
+                temp_pix = temp_nan_fallback;
             end
 
             if ~isempty(rrs_pix)
@@ -336,175 +341,131 @@ eigen_anap_cum     = [];
 eigen_acdom_cum    = [];
 eigen_bbp_cum      = [];
 temp_cum           = [];
-aphyt_model_cum     = [];
+aphyt_model_cum    = [];
 SPM_model_cum      = [];
 SPM_model_unc_cum  = [];
 N_cum              = [];
 
-%paramters of model relating Rrs to IOP
-L3 = 0.0949; %the one chosen
+L3 = 0.0949;
 L4 = 0.0794;
-
-% L3 = 0.0788; %joshi 2018
-% L4 = 0.2379;
-
-% L3 = 0.084; %lee2002
-% L4 = 0.17;
 
 if any(~isnan(rrs_pix))
 
+    % ------------------------------------------------------------------
+    % Precompute index vectors and system matrix ONCE per pixel.
+    % V and D_perm depend only on rrs_pix (fixed per pixel), NOT on
+    % temperature, so there is no need to rebuild them each temp iteration.
+    % ------------------------------------------------------------------
+    nSnap  = length(dim.Snap);
+    nScdom = length(dim.Scdom);
+    nY     = length(dim.Y);
+    nSf    = length(dim.Sf);
+    K      = nSnap * nScdom * nY * nSf;
+    N_wv   = length(wv);
+
+    % Index vectors for all K combinations (replaces 4-nested build loops)
+    [ii_g, mm_g, nn_g, gg_g] = ndgrid(1:nSnap, 1:nScdom, 1:nY, 1:nSf);
+    ii_vec = ii_g(:)';  mm_vec = mm_g(:)';
+    nn_vec = nn_g(:)';  gg_vec = gg_g(:)';
+
+    % Scalar parameters per combination (replaces B_matrix indexing)
+    Bmat_snap  = dim.Snap(ii_vec);
+    Bmat_scdom = dim.Scdom(mm_vec);
+    Bmat_Y     = dim.Y(nn_vec);
+
+    % V doesn't depend on temperature
+    [V, ~] = v(L3, L4, rrs_pix);      % column [N_wv x 1]
+    bb_p   = bb_p_ori .* V';           % [nY x N_wv]
+
+    % Sub-matrices for all K combinations [K x N_wv]
+    a_nap_all  = a_nap(ii_vec, :);
+    a_cdom_all = a_cdom(mm_vec, :);
+    bb_p_all   = bb_p(nn_vec, :);
+    a_phi_all  = a_phi(gg_vec, :);
+
+    % D_perm [N_wv x 4 x K]: layout for D_perm(:,:,k) \ h_col
+    % cat(3,...) gives [K x N_wv x 4]; permute([2,3,1]) -> [N_wv x 4 x K]
+    D_perm = permute(cat(3, a_nap_all, a_cdom_all, bb_p_all, a_phi_all), [2, 3, 1]);
+
+    % ------------------------------------------------------------------
+    % Temperature loop: only h (and therefore p_matrix) changes with temp
+    % ------------------------------------------------------------------
     for q = 1:length(temp_pix)
-        %temp_pix(q)
-        %--------------------------------------------------------------------------%
-        %water absorption
-        a_sea_water = asw_corr(temp_pix(q),wv);
-        %--------------------------------------------------------------------------%
 
-        [V,~]   = v(L3, L4, rrs_pix);
-        h       = Array_h(a_sea_water, bb_sea_water, V');
-        bb_p    = bb_p_ori.*V';
+        a_sea_water = asw_corr(temp_pix(q), wv);
+        h_col       = Array_h(a_sea_water, bb_sea_water, V');  % [N_wv x 1]
 
-        %-----------------------------------------------------------------%
-        %generate all possible combination of eigenvectors
-        k = 0;
-        for i = 1:length(dim.Snap)
-            for m = 1:length(dim.Scdom)
-                for n = 1:length(dim.Y)
-                    for g = 1:length(dim.Sf)
-                        k = k+1;
-                        B_matrix(:, :, :, k) = [dim.Snap(i); dim.Scdom(m); dim.Y(n);   dim.Sf(g) ]; %Sfcoef(g);
-                        D_matrix(:, :, :, k) = [a_nap(i, :); a_cdom(m, :); bb_p(n, :); a_phi(g, :)];
-                    end
-                end
-            end
+        % Solve all K least-squares systems with backslash (faster than manual SVD)
+        p_matrix = zeros(4, K);
+        for k = 1:K
+            p_matrix(:,k) = D_perm(:,:,k) \ h_col;
         end
 
-        %-----------------------------------------------------------------%
-        % Obtain linear solution by SVD decomposition for every combination of eigenvectors
-        for i = 1:length(dim.Snap)*length(dim.Y)*length(dim.Scdom)*length(dim.Sf)
-            A = D_matrix(:, :, i)';
-            b = h;
-            [U, S, J] = svd(A, 'econ'); % SVD decomposition
+        % Keep only physically realistic solutions
+        B = find(p_matrix(1,:)>-0.002 & p_matrix(2,:)>-0.002 & ...
+                 p_matrix(3,:)>-0.002 & p_matrix(4,:)>-0.002);
 
-            % Invert the diagonal S matrix, with thresholding for stability
-            s = diag(S);
-            tol = max(size(A)) * eps(max(s));  % typical SVD threshold
-            s_inv = zeros(size(s));
-            s_inv(s > tol) = 1 ./ s(s > tol);
-            S_inv = diag(s_inv);
+        if ~isempty(B)
+            % Vectorized IOP reconstruction [K x N_wv]
+            A_nap  = p_matrix(1,:)' .* a_nap_all;
+            A_cdom = p_matrix(2,:)' .* a_cdom_all;
+            B_bp   = p_matrix(3,:)' .* bb_p_all ./ V';   % divide out V scaling
+            A_phi  = p_matrix(4,:)' .* a_phi_all;
 
-            x = J * S_inv * U' * b; % Compute least-squares solution
-            p_matrix(:, i) = x; % Store result
-        end
-        clear A b s tol S_inv s_inv x J S U
+            a_total = A_nap + A_cdom + a_sea_water + A_phi;
+            b_total = B_bp  + bb_sea_water;
 
-        %----------------------------------------------------------------%
-        %keep only realistic solutions:
-        B = find(p_matrix(1,:)>-0.002 &  p_matrix(2,:)>-0.002 & p_matrix(3,:)>-0.002 & p_matrix(4,:)>-0.002);
+            % Forward model only for candidate solutions
+            bb_ov_ab  = b_total(B,:) ./ (a_total(B,:) + b_total(B,:));
+            rrs_model = L3 * bb_ov_ab + L4 * bb_ov_ab.^2;
 
-        o = 1;
-        if  ~isempty(B)
-            %-----------------------------------------------------------------%
-            %for each solution obtain the IOP associated with that solution:
-            k=1;
-            for i=1:length(dim.Snap)
-                for m=1:length(dim.Scdom)
-                    for n=1:length(dim.Y)
-                        for g=1:length(dim.Sf)
-                            A_nap(k,:)  =  a_nap(i,:)*p_matrix(1, k);
-                            A_cdom(k,:) =  a_cdom(m,:)*p_matrix(2, k);
-                            B_bp(k,:)   =  bb_p(n,:)./V'*p_matrix(3,k);
-                            A_phi(k,:)  =  a_phi(g,:)*p_matrix(4,k);
-                            k=k+1;
-                        end
-                    end
-                end
+            % Convergence check (vectorized)
+            rrs_row  = rrs_pix(:)';
+            criteria = max(conv_criteria * rrs_row, 0.001 * double(wv(:)' >= 700));
+            valid_rows = all(abs(rrs_model - rrs_row) < criteria, 2);
+            valid_B    = B(valid_rows);
+            num_valid  = numel(valid_B);
+
+            if num_valid > 0
+                anap_model    = A_nap(valid_B, :);
+                acdom_model   = A_cdom(valid_B, :);
+                bbp_model     = B_bp(valid_B, :);
+                bbp_exp_model = bb_p_ori(nn_vec(valid_B), :);       % no V scaling
+                D3            = a_phi_all(valid_B, :);
+                aphyt_model   = mean(A_phi(valid_B,:) ./ D3, 2, 'omitnan');
+                eigen_anap    = Bmat_snap(valid_B)';
+                eigen_acdom   = Bmat_scdom(valid_B)';
+                eigen_bbp     = Bmat_Y(valid_B)';
+                eigen_temp    = repmat(temp_pix(q), num_valid, 1);
+            else
+                num_valid     = 0;
+                anap_model    = zeros(0, N_wv);   acdom_model = zeros(0, N_wv);
+                bbp_model     = zeros(0, N_wv);   bbp_exp_model = zeros(0, N_wv);
+                aphyt_model   = zeros(0, 1);      eigen_anap  = zeros(0,1);
+                eigen_acdom   = zeros(0,1);        eigen_bbp   = zeros(0,1);
+                eigen_temp    = zeros(0,1);
             end
-
-            for i=1:length(dim.Snap)*length(dim.Y)*length(dim.Scdom)*length(dim.Sf)
-                a(i,:) = A_nap(i,:) + A_cdom(i,:)  + a_sea_water + A_phi(i,:); %   %compute the total absorption
-                b(i,:) = B_bp(i,:)  + bb_sea_water; %compute total backscattering
-            end
-
-            %----------------------------------------------------------------%
-            %generate the Rrs based on the solutions:
-            for i=1:length(B)
-                rrs_model(i,:) = L3*(b(B(i),:)./(a(B(i),:) + b(B(i),:)))+L4*(b(B(i),:)./(a(B(i),:) + b(B(i),:))).^2;
-            end
-
-            % figure(100);
-            % plot(wv,rrs_model,'b','LineWidth',0.5)
-            % hold on
-            % plot(wv,rrs_pix,'r','LineWidth',2)
-
-            % --- Precompute convergence criteria threshold ---
-            criteria = max(conv_criteria * rrs_pix', 0.001 * (wv >= 700)); %test on folder Emmanuel suggestions 4
-
-            % --- Compute difference matrix and logical match mask ---
-            diff_rrs = abs(rrs_model - rrs_pix');  % [num_models x num_wavelengths]
-            mask = diff_rrs < criteria;            % [num_models x num_wavelengths]
-
-            % --- Find models that match at all wavelengths ---
-            valid_rows = all(mask, 2);            % [num_models x 1]
-            valid_B = B(valid_rows);              % Indices into model parameter arrays
-            num_valid = numel(valid_B);
-
-            % --- Fetch model parameters in batch ---
-            anap_model(o:o+num_valid-1, :)    = A_nap(valid_B, :);
-            acdom_model(o:o+num_valid-1, :)   = A_cdom(valid_B, :);
-            bbp_model(o:o+num_valid-1, :)     = B_bp(valid_B, :);
-
-            % D_matrix slices
-            D2 = squeeze(D_matrix(3, :, valid_B))';   % [num_valid x num_wavelengths]
-            D3 = squeeze(D_matrix(4, :, valid_B))';   % [num_valid x num_wavelengths]
-
-            [~,n] = size(D2); if n<size(wv,2); D2 = D2';  D3 = D3'; end
-
-            bbp_exp_model(o:o+num_valid-1, :) = D2 ./ V';                                    % Compute bbp_exp
-            aphyt_model(o:o+num_valid-1, :)    = mean(A_phi(valid_B, :) ./ D3, 2, 'omitnan');% aphyt_model from A_phi and D3
-            eigen_anap(o:o+num_valid-1)       = squeeze(B_matrix(1,1,valid_B));              % Eigenvalue Scdom extraction
-            eigen_acdom(o:o+num_valid-1)      = squeeze(B_matrix(2,1,valid_B));              % Eigenvalue Scdom extraction
-            eigen_bbp(o:o+num_valid-1)        = squeeze(B_matrix(3,1,valid_B));              % Eigenvalue Ybbp extraction
-            eigen_temp(o:o+num_valid-1)       = temp_pix(q);                                 % Constant temp for these matches
-            N(o)                              = num_valid;                                   % Model index (original i) tracking
-
-            % % Update output index
-            % o = o + num_valid
+        else
+            num_valid     = 0;
+            anap_model    = zeros(0, N_wv);   acdom_model = zeros(0, N_wv);
+            bbp_model     = zeros(0, N_wv);   bbp_exp_model = zeros(0, N_wv);
+            aphyt_model   = zeros(0, 1);      eigen_anap  = zeros(0,1);
+            eigen_acdom   = zeros(0,1);        eigen_bbp   = zeros(0,1);
+            eigen_temp    = zeros(0,1);
         end
 
-        if  ~exist('N', 'var')
-            N=0;
-            anap_model(1, :)    = NaN(1,length(wv));
-            acdom_model(1, :)   = NaN(1,length(wv));
-            bbp_model(1, :)     = NaN(1,length(wv));
-            bbp_exp_model(1, :) = NaN(1,length(wv));
-            aphyt_model(1,:)    = NaN;%(1,length(wv));
-            eigen_anap(1)       = NaN;
-            eigen_acdom(1)      = NaN;
-            eigen_bbp(1)        = NaN;
-            eigen_temp(1)       = NaN;
-        end
+        anap_model_cum    = [anap_model_cum;    anap_model];
+        acdom_model_cum   = [acdom_model_cum;   acdom_model];
+        bbp_model_cum     = [bbp_model_cum;     bbp_model];
+        bbp_exp_model_cum = [bbp_exp_model_cum; bbp_exp_model];
+        aphyt_model_cum   = [aphyt_model_cum;   aphyt_model];
+        eigen_anap_cum    = [eigen_anap_cum;    eigen_anap];
+        eigen_acdom_cum   = [eigen_acdom_cum;   eigen_acdom];
+        eigen_bbp_cum     = [eigen_bbp_cum;     eigen_bbp];
+        temp_cum          = [temp_cum;          eigen_temp];
+        N_cum             = [N_cum;             num_valid];
 
-        anap_model_cum     = [anap_model_cum;       anap_model];
-        acdom_model_cum    = [acdom_model_cum;      acdom_model];
-        bbp_model_cum      = [bbp_model_cum;        bbp_model];
-        bbp_exp_model_cum  = [bbp_exp_model_cum;    bbp_exp_model];
-        aphyt_model_cum     = [aphyt_model_cum;       aphyt_model];
-        eigen_anap_cum     = [eigen_anap_cum;       eigen_anap'];
-        eigen_acdom_cum    = [eigen_acdom_cum;      eigen_acdom'];
-        eigen_bbp_cum      = [eigen_bbp_cum;        eigen_bbp'];
-        temp_cum           = [temp_cum;             eigen_temp'];
-        N_cum              = [N_cum;                N];
-
-
-        clear anap_model  acdom_model bbp_model  bbp_exp_model ...
-            aphyt_model eigen_bbp asw N criteria B mask n valid_B ...
-            valid_rows diff_rrs rrs_model eigen_anap eigen_acdom mask ...
-            p_matrix eigen_temp D2 D3 D_matrix B_matrix a A_cdom A_nap A_phi b B_bp...
-            g h i k m n N o Rrs_model rrs_model
-
-
-    end
+    end  % temperature loop
 
     %% SPM estimates
     %-------------------------------------------------------------------------%
