@@ -2,186 +2,224 @@
 
 **MOSAIC (Multiple Wavelength Algorithm for Estimates of Light Absorption and Backscattering Properties in Turbid Waters)** is a semi-analytical inversion algorithm designed to retrieve inherent optical properties (IOPs) and suspended particulate matter (SPM) from red and near-infrared water-leaving reflectance measurements.
 
-The algorithm was developed for highly turbid estuarine, coastal, and inland waters where traditional blue-green ocean color inversion methods often fail. MOSAIC exploits the 650–850 nm spectral region and combines a Linear Matrix Inversion (LMI) framework with an ensemble-based uncertainty analysis.
+The algorithm was developed for highly turbid estuarine, coastal, and inland waters where traditional blue-green ocean color inversion methods often fail. MOSAIC exploits the 650–850 nm spectral region and combines a Linear Matrix Inversion (LMI) framework, built from a large ensemble of candidate spectral shapes, with a physically-constrained selection step and an ensemble-based uncertainty analysis.
 
 ## Scientific Background
 
 MOSAIC simultaneously estimates:
 
-* Non-algal particle absorption (*a<sub>NAP</sub>*)
-* Colored dissolved organic matter absorption (*a<sub>CDOM</sub>*)
-* Phytoplankton absorption (*a<sub>phy</sub>*)
-* Particle backscattering (*b<sub>bp</sub>*)
+* Non-algal particle absorption (*a<sub>NAP</sub>*) and its spectral slope
+* Colored dissolved organic matter absorption (*a<sub>CDOM</sub>*) and its spectral slope
+* Phytoplankton absorption magnitude (*a<sub>phy</sub>*)
+* Particle backscattering (*b<sub>bp</sub>*) and its spectral exponent
 * Suspended particulate matter concentration (SPM)
-* Water temperature (optional optimization parameter)
+* Water temperature (used as an optimization/fallback parameter when not supplied)
+
+Retrieved quantities fall into two groups:
+
+- **Primary outputs** — directly retrieved by the linear inversion and forward-model convergence check: particle backscattering (*b<sub>bp</sub>*) and its spectral exponent, SPM, and water temperature.
+- **Secondary outputs** — derived afterward by fitting a parametric shape (via nonlinear least squares) to the ensemble-mean spectra: NAP absorption at 443 nm and its slope, CDOM absorption at 440 nm and its slope, and phytoplankton absorption magnitude.
 
 The inversion is based on:
 
-1. Conversion of water reflectance to subsurface remote sensing reflectance (*rrs*).
-2. Transformation of *rrs* into the Gordon–Lee reflectance parameter *u*.
-3. Linear Matrix Inversion using large ensembles of spectral eigenvectors.
-4. Selection of physically realistic solutions.
-5. Ensemble averaging and uncertainty estimation.
-6. SPM retrieval through particle backscattering relationships.
-
-## Reference
-
-If you use this code, please cite:
-
-> Pereira, J. T. B., et al. (2026).
-> *MOSAIC: Multiple wavelength algorithm for estimates of light absorption and backscattering properties in turbid waters*.
-> SSRN Preprint.
-> https://papers.ssrn.com/sol3/papers.cfm?abstract_id=6138756
-
-## Features
-
-* Works with hyperspectral and multispectral reflectance data
-* Designed for turbid waters
-* Simultaneous retrieval of multiple IOPs
-* Ensemble inversion framework
-* Explicit uncertainty quantification
-* Supports image processing and point measurements
-* Temperature-dependent pure-water absorption correction
+1. Conversion of water-leaving reflectance (ρw) to subsurface remote-sensing reflectance (*rrs*) via `rrs = (ρw/π) / (0.52 + 1.7·(ρw/π))`.
+2. Per-pixel transformation of *rrs* into the Gordon/Lee reflectance parameter *u* (`bb/(a+bb)`) by solving the quadratic model of Wang, Boss & Roesler (2005), using fixed coefficients L3 = 0.0949 and L4 = 0.0794.
+3. Generation of a large ensemble of candidate spectral eigenvectors: NAP absorption slopes, CDOM absorption slopes, backscattering spectral exponents, and phytoplankton absorption shapes.
+4. Linear Matrix Inversion, solved independently for every combination of the above eigenvectors (and, when temperature is unknown, for every candidate temperature).
+5. Selection of physically realistic solutions (all four retrieved coefficients above a small negative tolerance), followed by a forward-model convergence check against the measured reflectance.
+6. Ensemble averaging of the accepted solutions and calculation of associated uncertainties.
+7. Parametric curve-fitting (via `fminsearch`) of the ensemble-mean absorption spectra to recover NAP/CDOM slopes and reference absorption values.
+8. SPM retrieval by testing a grid of candidate backscattering-to-SPM conversion factors against the retrieved *b<sub>bp</sub>* spectra, followed by a reflectance-uncertainty-weighted average.
 
 ## Inputs
 
 ### Required
 
-| Variable        | Description                     |
-| --------------- | ------------------------------- |
-| `RW`            | Water-leaving reflectance (ρw)  |
-| `RW_std`        | Reflectance uncertainty         |
-| `wavelength`    | Wavelength vector (nm)          |
-| `conv_criteria` | Inversion convergence threshold |
-| `temp`          | Water temperature (°C)          |
+| Variable        | Description                                                                 |
+| --------------- | ---------------------------------------------------------------------------- |
+| `RW`            | Water-leaving reflectance (ρw). A `[N × λ]` matrix for point spectra, or a `[rows × cols × λ]` cube for images. |
+| `RW_std`        | Reflectance uncertainty, same shape as `RW`.                                  |
+| `wavelength`    | Wavelength vector (nm), matching the spectral dimension of `RW`.             |
+| `conv_criteria` | Convergence threshold: fraction of measured *rrs* that the forward-modeled *rrs* must match at every band (see "Convergence check" below). |
+| `temp`          | Water temperature (°C). Scalar or per-pixel vector/matrix. `NaN` entries fall back to a search over a range of temperatures (see below). |
 
-### Spectral Range
+### Spectral Range and Data Dimensionality
 
-MOSAIC uses wavelengths between:
+MOSAIC's wavelength selection depends on whether the input is point spectra (2D) or an image cube (3D):
 
-```text
-650–850 nm
-```
+* **Point spectra (`RW` is 2D, `[N × λ]`)**: uses wavelengths in `650–850 nm`, **excluding** the atmospheric absorption window `745–773 nm`.
+* **Image cubes (`RW` is 3D, `[rows × cols × λ]`)**: uses wavelengths in `650–850 nm` **without** excluding the 745–773 nm window.
 
-with optional exclusion of atmospheric absorption regions around:
+This asymmetry is a current implementation detail rather than a deliberate design choice — see [Limitations](#limitations).
 
-```text
-745–773 nm
-```
+### Temperature fallback behavior
+
+If `temp` contains `NaN` values:
+- For **image cubes**, MOSAIC first checks whether any valid (non-NaN) temperatures exist anywhere in the scene. If so, it computes the scene-wide mean ± standard deviation once and uses that range as the candidate temperature set for every NaN pixel. If no valid temperatures exist anywhere, it falls back to a fixed `5–34 °C` range.
+- For **point spectra**, any `NaN` temperature is simply replaced by a fixed `5–34 °C` candidate range (no scene-statistics fallback is computed in this mode).
+
+### Convergence check
+
+A candidate solution is accepted only if, at every wavelength, the forward-modeled *rrs* falls within a tolerance of the measured *rrs*. That tolerance is `max(conv_criteria × rrs, 0.001)` for wavelengths ≥ 700 nm (i.e., a small absolute floor is enforced in addition to the relative criterion), and simply `conv_criteria × rrs` below 700 nm.
 
 ## Outputs
 
-The inversion returns:
+The inversion returns a `results` struct. Fields are sized `[N × 1]` for point-spectra input, or `[rows × cols]` for image-cube input.
 
-| Variable            | Description                        |
-| ------------------- | ---------------------------------- |
-| `anap_model_mean`   | NAP absorption at 443 nm           |
-| `acdom_model_mean`  | CDOM absorption at 440 nm          |
-| `bbp_model_mean`    | Particle backscattering at 700 nm  |
-| `aphyt_model_mean`  | Phytoplankton absorption magnitude |
-| `Sanap_model_mean`  | NAP spectral slope                 |
-| `Sacdom_model_mean` | CDOM spectral slope                |
-| `Ybbp_model_mean`   | Backscattering spectral exponent   |
-| `SPM`               | Suspended particulate matter       |
-| `temp`              | Estimated water temperature        |
+### Primary outputs
 
-Associated uncertainty estimates are also provided for all retrieved quantities.
+| Variable            | Description                                    |
+| ------------------- | ----------------------------------------------- |
+| `bbp_model_mean`    | Particle backscattering at 700 nm               |
+| `Ybbp_model_mean`   | Backscattering spectral exponent                |
+| `SPM`               | Suspended particulate matter concentration      |
+| `temp`              | Estimated/used water temperature (mean of accepted candidates) |
+
+### Secondary outputs
+
+| Variable            | Description                                    |
+| ------------------- | ----------------------------------------------- |
+| `anap_model_mean`   | NAP absorption at 443 nm (fitted from ensemble mean spectrum) |
+| `acdom_model_mean`  | CDOM absorption at 440 nm (fitted from ensemble mean spectrum) |
+| `aphyt_model_mean`  | Phytoplankton absorption magnitude (ensemble mean) |
+| `Sanap_model_mean`  | NAP spectral slope (fitted)                     |
+| `Sacdom_model_mean` | CDOM spectral slope (fitted)                    |
+
+### Diagnostics and uncertainty
+
+| Variable             | Description                                                        |
+| --------------------- | ------------------------------------------------------------------- |
+| `nn`                  | Number of accepted ensemble members ("N") used to build the pixel's estimates |
+| `anap_model_error`    | Uncertainty on `anap_model_mean`                                   |
+| `acdom_model_error`   | Uncertainty on `acdom_model_mean`                                  |
+| `bbp_model_error`     | Uncertainty on `bbp_model_mean`                                    |
+| `aphyt_model_error`   | Uncertainty on `aphyt_model_mean`                                  |
+| `Sanap_model_error`   | Uncertainty on `Sanap_model_mean`                                  |
+| `Sacdom_model_error`  | Uncertainty on `Sacdom_model_mean`                                 |
+| `Ybbp_model_error`    | Uncertainty on `Ybbp_model_mean`                                   |
+| `SPM_unc`             | Uncertainty on `SPM` (derived from the 16th/84th percentile spread of the weighted ensemble, scaled by 1/√5) |
+| `temp_unc`            | Uncertainty on `temp` (standard deviation across accepted temperature candidates) |
+
+If a pixel has no valid reflectance data, or no candidate solution converges (`N = 0`), its outputs remain `NaN`.
 
 ## Algorithm Workflow
 
 ```text
-ρw
+ρw, ρw_std
  │
  ▼
-rrs conversion
+rrs conversion  (rrs = (ρw/π) / (0.52 + 1.7·(ρw/π)))
  │
  ▼
-u transformation
+Per-pixel / per-temperature-candidate loop
+ │
+ ├── Solve u = f(rrs) quadratic (Wang, Boss & Roesler, 2005)
+ ├── Build eigenvector library:
+ │     • NAP absorption slopes        (Snap:  0.001–0.012, step 0.002)
+ │     • CDOM absorption slopes       (Scdom: 0.002–0.016, step 0.002)
+ │     • Backscattering exponents     (Y:     0–1.6,       step 0.1)
+ │     • Phytoplankton absorption shapes (5 cluster-derived shapes)
+ ├── Solve K = nSnap × nScdom × nY × nSf linear systems (one per combination)
+ ├── Keep solutions with all 4 coefficients > −0.002 (physical filter)
+ ├── Forward-model rrs from candidates; keep those within conv_criteria of measured rrs
+ └── Accumulate accepted solutions across all temperature candidates
  │
  ▼
-Generation of spectral eigenvectors
- │
- ├── NAP absorption
- ├── CDOM absorption
- ├── Particle backscattering
- └── Phytoplankton absorption
+Ensemble mean + std per IOP  →  anap, acdom, bbp, aphyt, temp (+ uncertainties)
  │
  ▼
-Linear Matrix Inversion
+Nonlinear curve fit (fminsearch) on ensemble-mean spectra
+ →  NAP/CDOM slopes + 443/440 nm reference absorption
  │
  ▼
-Physical filtering
- │
- ▼
-Ensemble of acceptable solutions
- │
- ▼
-Mean estimates + uncertainties
- │
- ▼
-SPM retrieval
+SPM retrieval: grid-search candidate bbp→SPM conversion factors,
+reflectance-uncertainty-weighted average, percentile-based uncertainty
 ```
 
 ## Example
 
 ```matlab
-results = IOP_inversion( ...
-    RW, ...
-    RW_std, ...
-    wavelength, ...
-    0.05, ...
-    temperature);
+[results] = IOP_inversion(RW, RW_std, wavelength, conv_criteria, sst);
 ```
 
 Access retrieved SPM:
 
 ```matlab
-spm = results.SPM;
+spm     = results.SPM;
 spm_unc = results.SPM_unc;
 ```
 
-Retrieve IOPs:
+Retrieve primary IOPs:
+
+```matlab
+bbp  = results.bbp_model_mean;
+ybbp = results.Ybbp_model_mean;
+temp = results.temp;
+```
+
+Retrieve secondary IOPs:
 
 ```matlab
 anap  = results.anap_model_mean;
 acdom = results.acdom_model_mean;
-bbp   = results.bbp_model_mean;
+aphyt = results.aphyt_model_mean;
 ```
 
-## Repository Structure
+## Repository / Code Structure
+
+`IOP_inversion.m` is the single entry-point script. Internally it defines the following **local functions** (not separate files):
 
 ```text
-.
-├── IOP_inversion.m
-├── phyto_avg_field.m
-├── weight_asses_field.m
-├── README.md
-└── examples/
+IOP_inversion.m
+│
+├── IOP_inversion(...)            % main entry point / driver
+├── get_AP_coeff_slope(...)       % fits NAP slope + 443 nm reference absorption
+├── get_ACDOM_coeff_slope(...)    % fits CDOM slope + 440 nm reference absorption
+├── get_BBP_coeff_slope(...)      % fits bbp exponent + 700 nm reference value
+├── insider_inversion(...)        % per-pixel / per-temperature LMI + physical filtering
+├── asw_corr(...)                 % temperature-corrected pure-water absorption
+├── weight_asses_field(...)       % reflectance-uncertainty weighting for SPM
+├── v(...)                        % solves for Gordon/Lee "u" parameter
+├── phyto_avg_field(...)          % 5 cluster-derived phytoplankton absorption shapes
+└── Array_h(...)                  % builds the known-term array for the LMI system
 ```
+
+If you split these into standalone files (e.g., matching an earlier repository layout with `phyto_avg_field.m` and `weight_asses_field.m` as separate files), update this section accordingly.
 
 ## Computational Notes
 
-For image inversions, the algorithm evaluates thousands of possible combinations of:
+For image inversions, the algorithm evaluates every combination of:
 
 * NAP spectral slopes
 * CDOM spectral slopes
 * Backscattering exponents
-* Temperature scenarios
+* Candidate temperatures (when `temp` contains `NaN`)
 
 Large scenes can therefore require substantial computation time and memory.
 
-Checkpoint saving is implemented during image processing to prevent loss of intermediate results.
+Checkpoint saving is implemented for image (3D) processing: results are saved to `results_checkpoint.mat` every 50 processed columns, overwriting the same file each time.
 
 ## Limitations
 
-* Optimized for turbid waters.
+* Optimized for turbid waters; not intended for clear open-ocean conditions.
 * Retrieval performance depends on the quality of atmospheric correction.
 * Accuracy decreases when reflectance uncertainty is high.
 * Spectral coverage below 650 nm is not currently used.
+* The 745–773 nm atmospheric-absorption exclusion is currently only applied for point-spectra (2D) input; image-cube (3D) processing does not exclude this band. This inconsistency should be reviewed/harmonized in a future revision.
+* When temperature is unknown for point-spectra input, the fallback search range is a fixed 5–34 °C, unlike image-cube processing, which computes a scene-specific range when any valid temperatures are available.
 
 ## License
 
 Please specify the license adopted by this repository (e.g., MIT, GPL-3.0, BSD-3-Clause).
+
+## Reference
+
+If you use this code, please cite:
+
+> Tavora, J., et al. (2026).
+> *MOSAIC: Multiple wavelength algorithm for estimates of light absorption and backscattering properties in turbid waters*.
+> SSRN Preprint.
+> https://papers.ssrn.com/sol3/papers.cfm?abstract_id=6138756
 
 ## Contact
 
