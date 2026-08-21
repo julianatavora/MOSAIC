@@ -89,10 +89,7 @@ if actualDims == 3
     results.SPM_unc            =NaN(size(rrs,1),size(rrs,2));
     results.temp_unc           =NaN(size(rrs,1),size(rrs,2));
 
-    nSave    = 50;                       % save cadence
-    chkFile  = 'results_checkpoint.mat'; % rolling file
-    %load('/Users/jtavorab/Documents/MOSAIC_v2/results_checkpoint_smallvenice.mat');
-
+   
     % Precompute fallback temperature range for NaN-temp pixels once,
     % avoiding global stat recomputation inside the per-pixel loop.
     if any(~isnan(temp(:)))
@@ -152,13 +149,6 @@ if actualDims == 3
         end
 
         fprintf('%0.0f/%0.0f\n',jj,size(rrs,2));
-
-        % save every nSave columns
-        if mod(size(rrs,2)-jj+1, nSave) == 0
-            save(chkFile,'results','-v7.3');   % overwrites the same file
-            fprintf('⟹ checkpoint saved to %s (up to col %d)\n', ...
-                chkFile, size(rrs,2)-jj+1);
-        end
 
     end
 
@@ -353,8 +343,6 @@ if any(~isnan(rrs_pix))
 
     % ------------------------------------------------------------------
     % Precompute index vectors and system matrix ONCE per pixel.
-    % V and D_perm depend only on rrs_pix (fixed per pixel), NOT on
-    % temperature, so there is no need to rebuild them each temp iteration.
     % ------------------------------------------------------------------
     nSnap  = length(dim.Snap);
     nScdom = length(dim.Scdom);
@@ -490,7 +478,7 @@ if any(~isnan(rrs_pix))
 
         SPM_max   = sum(prctile(SPM_model,84,[1 3])'.*Weight, "omitnan") ./ sum(Weight,"omitnan");
         SPM_min   = sum(prctile(SPM_model,16,[1 3])'.*Weight, "omitnan") ./ sum(Weight,"omitnan");
-        SPM_unc   = mean([SPM_max,SPM_min],'all',"omitnan").*(1./sqrt(5));
+        SPM_unc   = mean([SPM_max,SPM_min],'all',"omitnan").*(1./sqrt(numel(wv)));
 
         SPM_model_cum     = [SPM_model_cum; SPM_model_wm];
         SPM_model_unc_cum = [SPM_model_unc_cum; SPM_unc];
@@ -525,14 +513,6 @@ absorp_cor = interpolated_asw + (interpolated_psiT .* (temp_pix - 22));
 end
 
 function [Weight] = weight_asses_field(error,rrs,nm)
-% Weight assessment function for SPM and associated uncertainty estimates
-%
-% INPUTS:
-% nm         -  wavelengths associated with measured Remote sensing reflectance
-% std        -  standard deviation of measured below water rrs(nm)
-% rrs        -  measured below water rrs(nm)
-%
-% OUTPUTS:
 % Weight     - Maximum uncertainty taking into account absolute and relative uncertainties propagated to SPM
 %----------------------------------------------------------------------------------------------------------------------------------------------------%
 
