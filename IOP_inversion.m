@@ -182,7 +182,6 @@ elseif actualDims == 2
         wv          = wavelength(id);
         temp_pix    = temp(ii);
         if isnan(temp_pix)
-            % temp_pix = 12:1:34;
             temp_pix = 5:1:34;
         end
 
