@@ -8,16 +8,17 @@ The algorithm was developed for highly turbid estuarine, coastal, and inland wat
 
 MOSAIC simultaneously estimates:
 
+
+* Particle backscattering (*b<sub>bp</sub>*) and its spectral exponent (*Y<sub>bbp</sub>*)
+* Suspended particulate matter concentration (SPM)
+* Water temperature (used as an optimization/fallback parameter when not supplied)
 * Non-algal particle absorption (*a<sub>NAP</sub>*) and its spectral slope
 * Colored dissolved organic matter absorption (*a<sub>CDOM</sub>*) and its spectral slope
 * Phytoplankton absorption magnitude (*a<sub>phy</sub>*)
-* Particle backscattering (*b<sub>bp</sub>*) and its spectral exponent
-* Suspended particulate matter concentration (SPM)
-* Water temperature (used as an optimization/fallback parameter when not supplied)
 
 Retrieved quantities fall into two groups:
 
-- **Primary outputs** — directly retrieved by the linear inversion and forward-model convergence check: particle backscattering (*b<sub>bp</sub>*) and its spectral exponent, SPM, and water temperature.
+- **Primary outputs** — directly retrieved by the linear inversion and forward-model convergence check: particle backscattering (*b<sub>bp</sub>*) and its spectral exponent (*Y<sub>bbp</sub>*), SPM, and water temperature.
 - **Secondary outputs** — derived afterward by fitting a parametric shape (via nonlinear least squares) to the ensemble-mean spectra: NAP absorption at 443 nm and its slope, CDOM absorption at 440 nm and its slope, and phytoplankton absorption magnitude.
 
 The inversion is based on:
@@ -26,10 +27,9 @@ The inversion is based on:
 2. Per-pixel transformation of *rrs* into the Gordon/Lee reflectance parameter *u* (`bb/(a+bb)`) by solving the quadratic model of Wang, Boss & Roesler (2005), using fixed coefficients L3 = 0.0949 and L4 = 0.0794.
 3. Generation of a large ensemble of candidate spectral eigenvectors: NAP absorption slopes, CDOM absorption slopes, backscattering spectral exponents, and phytoplankton absorption shapes.
 4. Linear Matrix Inversion, solved independently for every combination of the above eigenvectors (and, when temperature is unknown, for every candidate temperature).
-5. Selection of physically realistic solutions (all four retrieved coefficients above a small negative tolerance), followed by a forward-model convergence check against the measured reflectance.
+5. Selection of physically realistic solutions, followed by a forward-model convergence check against the measured reflectance.
 6. Ensemble averaging of the accepted solutions and calculation of associated uncertainties.
-7. Parametric curve-fitting (via `fminsearch`) of the ensemble-mean absorption spectra to recover NAP/CDOM slopes and reference absorption values.
-8. SPM retrieval by testing a grid of candidate backscattering-to-SPM conversion factors against the retrieved *b<sub>bp</sub>* spectra, followed by a reflectance-uncertainty-weighted average.
+7. SPM retrieval by testing a grid of candidate backscattering-to-SPM conversion factors against the retrieved *b<sub>bp</sub>* spectra, followed by a reflectance-uncertainty-weighted average.
 
 ## Inputs
 
@@ -40,17 +40,8 @@ The inversion is based on:
 | `RW`            | Water-leaving reflectance (ρw). A `[N × λ]` matrix for point spectra, or a `[rows × cols × λ]` cube for images. |
 | `RW_std`        | Reflectance uncertainty, same shape as `RW`.                                  |
 | `wavelength`    | Wavelength vector (nm), matching the spectral dimension of `RW`.             |
-| `conv_criteria` | Convergence threshold: fraction of measured *rrs* that the forward-modeled *rrs* must match at every band (see "Convergence check" below). |
-| `temp`          | Water temperature (°C). Scalar or per-pixel vector/matrix. `NaN` entries fall back to a search over a range of temperatures (see below). |
-
-### Spectral Range and Data Dimensionality
-
-MOSAIC's wavelength selection depends on whether the input is point spectra (2D) or an image cube (3D):
-
-* **Point spectra (`RW` is 2D, `[N × λ]`)**: uses wavelengths in `650–850 nm`, **excluding** the atmospheric absorption window `745–773 nm`.
-* **Image cubes (`RW` is 3D, `[rows × cols × λ]`)**: uses wavelengths in `650–850 nm` **without** excluding the 745–773 nm window.
-
-This asymmetry is a current implementation detail rather than a deliberate design choice — see [Limitations](#limitations).
+| `conv_criteria` | Convergence threshold: fraction of measured *rrs* that the forward-modeled *rrs* must match at every band (10 or 25%; see "Convergence check" below). |
+| `temp`          | Water temperature (°C). Scalar or per-pixel vector/matrix. `NaN` entries fall back to a search over a range of temperatures (by default 5–34 °C; see below). |
 
 ### Temperature fallback behavior
 
@@ -64,7 +55,7 @@ A candidate solution is accepted only if, at every wavelength, the forward-model
 
 ## Outputs
 
-The inversion returns a `results` struct. Fields are sized `[N × 1]` for point-spectra input, or `[rows × cols]` for image-cube input.
+The inversion returns a `results` struct.
 
 ### Primary outputs
 
@@ -184,8 +175,6 @@ IOP_inversion.m
 └── Array_h(...)                  % builds the known-term array for the LMI system
 ```
 
-If you split these into standalone files (e.g., matching an earlier repository layout with `phyto_avg_field.m` and `weight_asses_field.m` as separate files), update this section accordingly.
-
 ## Computational Notes
 
 For image inversions, the algorithm evaluates every combination of:
@@ -197,16 +186,12 @@ For image inversions, the algorithm evaluates every combination of:
 
 Large scenes can therefore require substantial computation time and memory.
 
-Checkpoint saving is implemented for image (3D) processing: results are saved to `results_checkpoint.mat` every 50 processed columns, overwriting the same file each time.
-
 ## Limitations
 
-* Optimized for turbid waters; not intended for clear open-ocean conditions.
+* Optimized for turbid waters; not intended for clear open-ocean conditions. Typically struggles in low turbidity
 * Retrieval performance depends on the quality of atmospheric correction.
 * Accuracy decreases when reflectance uncertainty is high.
 * Spectral coverage below 650 nm is not currently used.
-* The 745–773 nm atmospheric-absorption exclusion is currently only applied for point-spectra (2D) input; image-cube (3D) processing does not exclude this band. This inconsistency should be reviewed/harmonized in a future revision.
-* When temperature is unknown for point-spectra input, the fallback search range is a fixed 5–34 °C, unlike image-cube processing, which computes a scene-specific range when any valid temperatures are available.
 
 ## License
 
@@ -217,9 +202,9 @@ Please specify the license adopted by this repository (e.g., MIT, GPL-3.0, BSD-3
 If you use this code, please cite:
 
 > Tavora, J., et al. (2026).
-> *MOSAIC: Multiple wavelength algorithm for estimates of light absorption and backscattering properties in turbid waters*.
-> SSRN Preprint.
-> https://papers.ssrn.com/sol3/papers.cfm?abstract_id=6138756
+> *An algorithm for the retrieval of particle backscattering, size, and suspended particulate matter in turbid coastal and estuarine waters (MOSAIC)*.
+> Remote Sensing of Environment.
+> (https://doi.org/10.1016/j.rse.2026.115629) 
 
 ## Contact
 
