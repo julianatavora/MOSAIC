@@ -51,7 +51,7 @@ If `temp` contains `NaN` values:
 
 ### Convergence check
 
-A candidate solution is accepted only if, at every wavelength, the forward-modeled *rrs* falls within a tolerance of the measured *rrs*. That tolerance is `max(conv_criteria × rrs, 0.001)` for wavelengths ≥ 700 nm (i.e., a small absolute floor is enforced in addition to the relative criterion), and simply `conv_criteria × rrs` below 700 nm.
+A candidate solution is accepted only if, at every wavelength, the forward-modeled *rrs* falls within a tolerance of the measured *rrs*  of 10 or 25%. That tolerance is `max(conv_criteria × rrs, 0.001)` for wavelengths ≥ 700 nm (i.e., a small absolute floor is enforced in addition to the relative criterion), and simply `conv_criteria × rrs` below 700 nm.
 
 ## Outputs
 
@@ -70,9 +70,9 @@ The inversion returns a `results` struct.
 
 | Variable            | Description                                    |
 | ------------------- | ----------------------------------------------- |
-| `anap_model_mean`   | NAP absorption at 443 nm (fitted from ensemble mean spectrum) |
-| `acdom_model_mean`  | CDOM absorption at 440 nm (fitted from ensemble mean spectrum) |
-| `aphyt_model_mean`  | Phytoplankton absorption magnitude (ensemble mean) |
+| `anap_model_mean`   | NAP absorption at 443 nm (from ensemble mean spectrum) |
+| `acdom_model_mean`  | CDOM absorption at 440 nm (from ensemble mean spectrum) |
+| `aphyt_model_mean`  | Phytoplankton absorption magnitude (from ensemble mean) |
 | `Sanap_model_mean`  | NAP spectral slope (fitted)                     |
 | `Sacdom_model_mean` | CDOM spectral slope (fitted)                    |
 
@@ -81,14 +81,14 @@ The inversion returns a `results` struct.
 | Variable             | Description                                                        |
 | --------------------- | ------------------------------------------------------------------- |
 | `nn`                  | Number of accepted ensemble members ("N") used to build the pixel's estimates |
-| `anap_model_error`    | Uncertainty on `anap_model_mean`                                   |
-| `acdom_model_error`   | Uncertainty on `acdom_model_mean`                                  |
-| `bbp_model_error`     | Uncertainty on `bbp_model_mean`                                    |
-| `aphyt_model_error`   | Uncertainty on `aphyt_model_mean`                                  |
-| `Sanap_model_error`   | Uncertainty on `Sanap_model_mean`                                  |
-| `Sacdom_model_error`  | Uncertainty on `Sacdom_model_mean`                                 |
-| `Ybbp_model_error`    | Uncertainty on `Ybbp_model_mean`                                   |
-| `SPM_unc`             | Uncertainty on `SPM` (derived from the 16th/84th percentile spread of the weighted ensemble, scaled by 1/√5) |
+| `anap_model_error`    | Uncertainty on `anap_model_mean` (variability on retrieved estimates)                                  |
+| `acdom_model_error`   | Uncertainty on `acdom_model_mean` (variability on retrieved estimates)                                  |
+| `bbp_model_error`     | Uncertainty on `bbp_model_mean` (variability on retrieved estimates)                                     |
+| `aphyt_model_error`   | Uncertainty on `aphyt_model_mean` (variability on retrieved estimates)                                   |
+| `Sanap_model_error`   | Uncertainty on `Sanap_model_mean` (variability on retrieved estimates)                                   |
+| `Sacdom_model_error`  | Uncertainty on `Sacdom_model_mean` (variability on retrieved estimates)                                 |
+| `Ybbp_model_error`    | Uncertainty on `Ybbp_model_mean` (variability on retrieved estimates)                                   |
+| `SPM_unc`             | Uncertainty on `SPM` (derived from the 16th/84th percentile spread of the weighted ensemble) |
 | `temp_unc`            | Uncertainty on `temp` (standard deviation across accepted temperature candidates) |
 
 If a pixel has no valid reflectance data, or no candidate solution converges (`N = 0`), its outputs remain `NaN`.
@@ -111,7 +111,7 @@ Per-pixel / per-temperature-candidate loop
  │     • Backscattering exponents     (Y:     0–1.6,       step 0.1)
  │     • Phytoplankton absorption shapes (5 cluster-derived shapes)
  ├── Solve K = nSnap × nScdom × nY × nSf linear systems (one per combination)
- ├── Keep solutions with all 4 coefficients > −0.002 (physical filter)
+ ├── Keep solutions with all 4 coefficients > −0.002 
  ├── Forward-model rrs from candidates; keep those within conv_criteria of measured rrs
  └── Accumulate accepted solutions across all temperature candidates
  │
@@ -119,8 +119,7 @@ Per-pixel / per-temperature-candidate loop
 Ensemble mean + std per IOP  →  anap, acdom, bbp, aphyt, temp (+ uncertainties)
  │
  ▼
-Nonlinear curve fit (fminsearch) on ensemble-mean spectra
- →  NAP/CDOM slopes + 443/440 nm reference absorption
+Nonlinear curve fit on ensemble-mean spectra
  │
  ▼
 SPM retrieval: grid-search candidate bbp→SPM conversion factors,
