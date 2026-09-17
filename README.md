@@ -19,7 +19,7 @@ MOSAIC simultaneously estimates:
 Retrieved quantities fall into two groups:
 
 - **Primary outputs** — directly retrieved by the linear inversion and forward-model convergence check: particle backscattering (*b<sub>bp</sub>*) and its spectral exponent (*Y<sub>bbp</sub>*), SPM, and water temperature.
-- **Secondary outputs** — derived afterward by fitting a parametric shape (via nonlinear least squares) to the ensemble-mean spectra: NAP absorption at 443 nm and its slope, CDOM absorption at 440 nm and its slope, and phytoplankton absorption magnitude.
+- **Secondary outputs** — NAP absorption at 443 nm and its slope, CDOM absorption at 440 nm and its slope, and phytoplankton absorption magnitude.
 
 The inversion is based on:
 
