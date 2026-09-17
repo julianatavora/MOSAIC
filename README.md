@@ -24,7 +24,7 @@ Retrieved quantities fall into two groups:
 The inversion is based on:
 
 1. Conversion of water-leaving reflectance (ρw) to subsurface remote-sensing reflectance (*rrs*) via `rrs = (ρw/π) / (0.52 + 1.7·(ρw/π))`.
-2. Per-pixel transformation of *rrs* into the Gordon/Lee reflectance parameter *u* (`bb/(a+bb)`) by solving the quadratic model of Wang, Boss & Roesler (2005), using fixed coefficients L3 = 0.0949 and L4 = 0.0794.
+2. Per-pixel transformation of *rrs* into the Gordon/Lee reflectance parameter *u* (`bb/(a+bb)`) by solving the quadratic model using fixed coefficients L3 = 0.0949 and L4 = 0.0794.
 3. Generation of a large ensemble of candidate spectral eigenvectors: NAP absorption slopes, CDOM absorption slopes, backscattering spectral exponents, and phytoplankton absorption shapes.
 4. Linear Matrix Inversion, solved independently for every combination of the above eigenvectors (and, when temperature is unknown, for every candidate temperature).
 5. Selection of physically realistic solutions, followed by a forward-model convergence check against the measured reflectance.
